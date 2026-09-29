@@ -14,12 +14,12 @@ import urllib.parse
 
 import qrcode
 
-STORE_UPI_ID = os.getenv("manthankhandelwal93-1@okicici", "sanjeevanimedical@okaxis")   # demo value - replace
+STORE_UPI_ID = os.getenv("manthankhandelwal93-1@okicici", "manthankhandelwal93-1@okicici")   # demo value - replace
 UPI_ID_PATTERN = re.compile(r"^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}$")
 
 
 def is_demo_upi(vpa: str = STORE_UPI_ID) -> bool:
-    return vpa == "sanjeevanimedical@okaxis"
+    return vpa == "manthankhandelwal93-1@okicici"
 
 
 def valid_upi_id(vpa: str) -> bool:
