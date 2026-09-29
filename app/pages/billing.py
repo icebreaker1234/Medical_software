@@ -6,6 +6,8 @@ import streamlit.components.v1 as components
 
 from app import db
 from app.ui import STORE_DL, STORE_GSTIN, STORE_NAME, inr
+from app.upi import STORE_UPI_ID, is_demo_upi, qr_data_uri, qr_png, upi_link
+from app.whatsapp import bill_message, normalize_phone, wa_link
 
 st.title("🧾 Billing (POS)")
 
@@ -44,7 +46,7 @@ def add_to_cart(pid: int, qty: int = 1):
     reset_cart(items)
 
 
-def invoice_html(inv: dict, patient: str, doctor: str | None, mode: str) -> str:
+def invoice_html(inv: dict, patient: str, doctor: str | None, mode: str, qr_uri: str | None = None) -> str:
     rows = "".join(
         f"<tr><td>{html.escape(l['product'])}{' <b>(' + l['schedule'] + ')</b>' if l['schedule'] != 'OTC' else ''}"
         f"</td><td>{l['hsn']}</td><td>{l['batch']}</td><td>{l['expiry'][:7]}</td><td>{l['qty']}</td>"
@@ -66,6 +68,8 @@ def invoice_html(inv: dict, patient: str, doctor: str | None, mode: str) -> str:
       CGST: ₹{t['tax'] / 2:.2f} · SGST: ₹{t['tax'] / 2:.2f}</td>
       <td style="text-align:right">MRP total: ₹{t['gross']:.2f}<br>Discount: -₹{t['disc']:.2f}<br>
       <b style="font-size:15px">Net payable: ₹{t['total']:.2f}</b></td></tr></table>
+      {f'<div style="margin-top:8px;text-align:center"><img src="{qr_uri}" width="120"><br>'
+       f'<b>Scan to pay ₹{t["total"]:.2f} by UPI</b> · {STORE_UPI_ID}</div>' if qr_uri else ''}
       <div style="font-size:10px;margin-top:8px">Prices are inclusive of GST. Computer-generated invoice.
       Pharmacist: ____________</div></div>"""
 
@@ -136,12 +140,17 @@ with tab_bill:
         needs_h1 = any(c["schedule"] == "H1" for c in cart)
         custs = db.q("SELECT id, name, phone, doctor FROM customers ORDER BY name")
         ctype = st.radio("Customer", ["Walk-in", "Registered"], horizontal=True)
-        customer_id, patient, default_doc = None, "", ""
+        customer_id, patient, default_doc, default_phone = None, "", "", ""
         if ctype == "Registered":
             copt = {f"{r['name']} · {r['phone']}": r for _, r in custs.iterrows()}
             sel = st.selectbox("Search by name / phone", list(copt), index=None)
             if sel:
                 customer_id, patient, default_doc = int(copt[sel]["id"]), copt[sel]["name"], copt[sel]["doctor"]
+                default_phone = copt[sel]["phone"] or ""
+        phone_raw = st.text_input("Customer mobile (to send bill on WhatsApp)", value=default_phone,
+                                  placeholder="10-digit mobile, e.g. 9876543210")
+        if phone_raw and not normalize_phone(phone_raw):
+            st.warning("Enter a valid 10-digit Indian mobile number")
         if ctype == "Walk-in" or needs_h1:
             patient = st.text_input("Patient name" + (" (required - H1 register)" if needs_h1 else ""),
                                     value=patient)
@@ -171,7 +180,7 @@ with tab_bill:
                       "disc_pct": float(c["disc_pct"])} for c in cart],
                     payment_mode=mode or "Cash", customer_id=customer_id,
                     patient_name=patient or None, doctor_name=doctor or None, rx_ref=rx or None)
-                st.session_state.last_invoice = (inv, patient, doctor, mode)
+                st.session_state.last_invoice = (inv, patient, doctor, mode, normalize_phone(phone_raw))
                 reset_cart([])
                 st.cache_data.clear()
                 st.rerun()
@@ -183,10 +192,31 @@ with tab_bill:
         st.caption("Shortcuts: Enter = add item · Ctrl+Enter = save bill · Esc = clear")
 
     if st.session_state.last_invoice:
-        inv, patient, doctor, mode = st.session_state.last_invoice
+        inv, patient, doctor, mode, phone = st.session_state.last_invoice
         st.success(f"Saved {inv['invoice_no']} · {inr(inv['totals']['total'], 2)}")
-        page = invoice_html(inv, patient, doctor, mode)
-        components.html(page, height=160 + 34 * len(inv["lines"]) + 140, scrolling=True)
+        if phone:
+            c1, c2 = st.columns([1, 2])
+            items = c2.checkbox("Include medicine names in the message", value=True)
+            msg = bill_message(inv, STORE_NAME, patient, include_items=items)
+            c1.link_button(f"📲 Send bill on WhatsApp (+{phone[:2]} {phone[2:]})",
+                           wa_link(phone, msg), type="primary", width="stretch")
+            with st.expander("Preview WhatsApp message"):
+                st.text(msg)
+        else:
+            st.caption("Tip: enter the customer's mobile before saving to send the bill on WhatsApp.")
+        # UPI QR with the exact amount - shown for UPI and Credit (pay-later) bills
+        qr_uri = None
+        if mode in ("UPI", "Credit") and inv["totals"]["total"] > 0:
+            link = upi_link(inv["totals"]["total"], f"Bill {inv['invoice_no']}", payee=STORE_NAME)
+            qr_uri = qr_data_uri(link)
+            q1, q2 = st.columns([1, 3])
+            q1.image(qr_png(link), width=180)
+            q2.markdown(f"**Scan to pay {inr(inv['totals']['total'], 2)}**  \nUPI ID: `{STORE_UPI_ID}`  \n"
+                        "Works with GPay, PhonePe, Paytm, BHIM. Amount is pre-filled.")
+            if is_demo_upi():
+                q2.warning("Demo UPI ID - set STORE_UPI_ID to the store's real UPI ID before use.")
+        page = invoice_html(inv, patient, doctor, mode, qr_uri)
+        components.html(page, height=160 + 34 * len(inv["lines"]) + (300 if qr_uri else 140), scrolling=True)
         st.download_button("⬇ Download invoice (HTML - print to PDF)", page,
                            file_name=f"{inv['invoice_no'].replace('/', '-')}.html", mime="text/html")
 

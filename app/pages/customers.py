@@ -4,6 +4,8 @@ import streamlit as st
 
 from app import analytics, db
 from app.ui import STORE_NAME, inr, money_cols
+from app.upi import STORE_UPI_ID, qr_png, upi_link
+from app.whatsapp import normalize_phone, udhaar_message, wa_link
 
 st.title("👥 Customers")
 tab_list, tab_refill, tab_credit, tab_add = st.tabs(
@@ -41,21 +43,52 @@ with tab_refill:
                    "get the customer's consent before messaging.")
 
 with tab_credit:
-    due = bal[bal["outstanding"] > 1].sort_values("outstanding", ascending=False)
-    st.metric("Total outstanding", inr(due["outstanding"].sum()), f"{len(due)} customers",
-              delta_color="off")
-    st.dataframe(due[["name", "phone", "outstanding", "last_visit"]], hide_index=True, width="stretch",
-                 column_config=money_cols(due, ["outstanding"]))
-    if len(due):
-        with st.form("pay"):
-            who = st.selectbox("Receive payment from", due["name"] + " · " + due["phone"])
-            amt = st.number_input("Amount (₹)", 1.0, 1e6, 100.0)
-            mode = st.selectbox("Mode", ["Cash", "UPI", "Card"])
+    led = analytics.udhaar_ledger()
+    if led.empty:
+        st.success("No pending credit (udhaar).")
+    else:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total outstanding", inr(led["outstanding"].sum()))
+        c2.metric("Customers with dues", len(led))
+        c3.metric("Pending > 30 days", inr(led.loc[led["days_pending"] > 30, "outstanding"].sum()))
+        ages = st.multiselect("Ageing", ["0-15 days", "16-30 days", "31-60 days", "60+ days"],
+                              placeholder="All ageing buckets")
+        view = led[led["ageing"].isin(ages)] if ages else led
+
+        def reminder(r):
+            phone = normalize_phone(r["phone"])
+            if not phone:
+                return None
+            msg = udhaar_message(r["name"], r["outstanding"], STORE_NAME, STORE_UPI_ID, r["last_credit_bill"])
+            return wa_link(phone, msg)
+        view = view.assign(remind=view.apply(reminder, axis=1))
+        st.dataframe(
+            view[["name", "phone", "outstanding", "credit_bills", "last_credit_bill", "last_payment_date",
+                  "days_pending", "ageing", "remind"]],
+            hide_index=True, width="stretch",
+            column_config={**money_cols(view, ["outstanding"]),
+                           "remind": st.column_config.LinkColumn("Reminder", display_text="📲 WhatsApp")})
+        st.caption("Click 📲 WhatsApp to open a polite reminder with the pending amount and your UPI ID. "
+                   "The pharmacist reviews and sends it.")
+
+        st.markdown("**Receive payment**")
+        who = st.selectbox("Customer", led["name"] + " · " + led["phone"])
+        cid = int(led.loc[led["phone"] == who.split(" · ")[1], "id"].iloc[0])
+        due_amt = float(led.loc[led["id"] == cid, "outstanding"].iloc[0])
+        with st.form(f"pay_{cid}"):
+            amt = st.number_input("Amount (₹)", 1.0, 1e6, round(due_amt, 2))
+            mode = st.selectbox("Mode", ["UPI", "Cash", "Card"])
+            show_qr = st.checkbox("Show UPI QR for this amount", value=True)
             if st.form_submit_button("Record payment", type="primary"):
-                cid = int(due.loc[due["phone"] == who.split(" · ")[1], "id"].iloc[0])
                 db.record_payment(cid, float(amt), mode)
-                st.success("Payment recorded")
+                st.success(f"Payment of {inr(amt, 2)} recorded")
                 st.rerun()
+        if show_qr:
+            link = upi_link(float(amt), f"Udhaar {who.split(' · ')[0]}", payee=STORE_NAME)
+            q1, q2 = st.columns([1, 3])
+            q1.image(qr_png(link), width=170)
+            q2.markdown(f"Customer scans to pay **{inr(amt, 2)}** to `{STORE_UPI_ID}`, "
+                        "then click *Record payment* once it is received.")
 
 with tab_add:
     with st.form("cust"):

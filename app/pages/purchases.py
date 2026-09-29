@@ -1,14 +1,18 @@
-from datetime import timedelta
+import hashlib
+import io
+import random
+from datetime import date, timedelta
 
 import pandas as pd
 import streamlit as st
 
 from app import db
+from app.ocr import OCRUnavailable, parse_bill, run_ocr, sample_invoice
 from app.ui import inr, money_cols
 
 st.title("🚚 Purchases")
-tab_new, tab_hist, tab_ret = st.tabs(["New purchase (GRN)", "Purchase history",
-                                      "Expiry / breakage returns & claims"])
+tab_new, tab_scan, tab_hist, tab_ret = st.tabs(["New purchase (GRN)", "📷 Scan bill (OCR)",
+                                                "Purchase history", "Expiry / breakage returns & claims"])
 
 products = db.products_df()
 suppliers = db.q("SELECT id, name FROM suppliers WHERE active=1")
@@ -58,6 +62,132 @@ with tab_new:
             st.session_state.pop("grn", None)
         except ValueError as e:
             st.error(str(e))
+
+
+@st.cache_data(show_spinner=False)
+def _ocr_cached(img_bytes: bytes) -> str:
+    from PIL import Image
+    return run_ocr(Image.open(io.BytesIO(img_bytes)))
+
+
+def _demo_bill() -> bytes:
+    """A realistic distributor bill made from random catalogue items (for demos)."""
+    rnd = random.Random()
+    rows = products[products["mrp"] > 0].sample(rnd.randint(3, 6), random_state=rnd.randint(0, 9999))
+    items = []
+    for _, r in rows.iterrows():
+        rate = round(r["mrp"] / (1 + r["gst_rate"] / 100) * rnd.uniform(0.72, 0.8), 2)
+        exp = db.today() + timedelta(days=rnd.randint(300, 900))
+        items.append({"name": r["name"], "batch": f"{r['name'][:2].upper()}{rnd.randint(1000, 9999)}X",
+                      "expiry": f"{exp:%m/%y}", "qty": rnd.choice([10, 20, 30, 50]),
+                      "free": rnd.choice([0, 0, 1, 2]), "mrp": float(r["mrp"]), "rate": rate,
+                      "gst": float(r["gst_rate"])})
+    img = sample_invoice(items, rnd.choice(list(suppliers["name"])),
+                         f"SB/26/{rnd.randint(10000, 99999)}", db.today() - timedelta(days=1))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+with tab_scan:
+    st.caption("Photograph or upload the distributor's bill. The app reads it with OCR, matches each line "
+               "to your medicine list and fills the purchase entry. **Check every line before saving** - "
+               "OCR can misread batch numbers and prices.")
+    c1, c2 = st.columns([3, 1])
+    up = c1.file_uploader("Bill photo / scan (JPG or PNG)", type=["jpg", "jpeg", "png"])
+    c2.write("")
+    if c2.button("Try a sample bill", width="stretch"):
+        st.session_state.ocr_img = _demo_bill()
+        st.session_state.pop("ocr_grid", None)
+    if up is not None:
+        data = up.getvalue()
+        if hashlib.md5(data).hexdigest() != st.session_state.get("ocr_img_hash"):
+            st.session_state.ocr_img = data
+            st.session_state.ocr_img_hash = hashlib.md5(data).hexdigest()
+            st.session_state.pop("ocr_grid", None)
+    img_bytes = st.session_state.get("ocr_img")
+
+    text = None
+    if img_bytes:
+        try:
+            with st.spinner("Reading the bill..."):
+                text = _ocr_cached(img_bytes)
+        except OCRUnavailable as e:
+            st.error(str(e))
+    if img_bytes and text is not None:
+        left, right = st.columns([2, 3])
+        left.image(img_bytes, caption="Bill image", width="stretch")
+        with right:
+            bill = parse_bill(text, list(products["name"]), list(suppliers["name"]))
+            sup_names = list(suppliers["name"])
+            sup = st.selectbox("Supplier", sup_names,
+                               index=sup_names.index(bill.supplier) if bill.supplier in sup_names else 0,
+                               key=f"ocr_sup_{hash(img_bytes)}")
+            inv_no = st.text_input("Supplier invoice no.", value=bill.invoice_no or "",
+                                   key=f"ocr_inv_{hash(img_bytes)}")
+            found = len(bill.lines)
+            matched = sum(1 for l in bill.lines if l.medicine)
+            st.metric("Lines read", f"{found}", f"{matched} matched to your medicine list", delta_color="off")
+            with st.expander("Raw OCR text"):
+                st.text(text)
+
+        if not bill.lines:
+            st.warning("No item lines found. Try a sharper, straight photo in good light, or enter the bill manually.")
+        else:
+            grid = pd.DataFrame([{
+                "check": "OK" if (l.medicine and l.match_score >= 0.8 and l.rate > 0) else "⚠ check",
+                "medicine": l.medicine, "read_as": l.product_text, "match_%": int(l.match_score * 100),
+                "batch_no": l.batch_no, "expiry": pd.to_datetime(l.expiry).date() if l.expiry else None,
+                "qty": l.qty, "free_qty": l.free_qty, "rate": l.rate, "mrp": l.mrp, "gst_rate": l.gst_rate,
+            } for l in bill.lines])
+            st.markdown("**Review and correct, then save**")
+            edited = st.data_editor(
+                grid, hide_index=True, width="stretch", num_rows="dynamic", key=f"ocr_grid_{hash(img_bytes)}",
+                disabled=["check", "read_as", "match_%"],
+                column_config={
+                    "medicine": st.column_config.SelectboxColumn("Medicine", options=list(products["name"]),
+                                                                 width="large"),
+                    "read_as": st.column_config.TextColumn("OCR read"),
+                    "match_%": st.column_config.ProgressColumn("Match", min_value=0, max_value=100, format="%d%%"),
+                    "expiry": st.column_config.DateColumn("Expiry", min_value=db.today()),
+                    "rate": st.column_config.NumberColumn("Rate (ex-GST)", format="₹%.2f"),
+                    "mrp": st.column_config.NumberColumn("MRP", format="₹%.2f"),
+                    "gst_rate": st.column_config.SelectboxColumn("GST %", options=[0.0, 5.0, 12.0, 18.0]),
+                })
+            problems = []
+            for i, r in edited.iterrows():
+                if not r["medicine"]:
+                    problems.append(f"Row {i + 1}: choose the medicine")
+                if not str(r["batch_no"] or "").strip():
+                    problems.append(f"Row {i + 1}: batch number missing")
+                if pd.isna(r["expiry"]) or pd.to_datetime(r["expiry"]).date() <= db.today():
+                    problems.append(f"Row {i + 1}: expiry missing or past")
+                if not r["qty"] or r["qty"] <= 0 or not r["rate"] or r["rate"] <= 0:
+                    problems.append(f"Row {i + 1}: qty and rate must be > 0")
+                elif r["mrp"] and r["rate"] >= r["mrp"]:
+                    problems.append(f"Row {i + 1}: rate is not below MRP - check the numbers")
+            total = float((edited["qty"] * edited["rate"] * (1 + edited["gst_rate"] / 100)).sum())
+            st.metric("Bill total (calculated)", inr(total, 2))
+            for pmsg in problems[:6]:
+                st.warning(pmsg)
+            confirmed = st.checkbox("I have checked every line against the paper bill")
+            if st.button("Save purchase & add stock", type="primary",
+                         disabled=bool(problems) or not confirmed or not inv_no, key="ocr_save"):
+                name_to_id = dict(zip(products["name"], products["id"]))
+                try:
+                    pid = db.create_purchase(
+                        int(suppliers.loc[suppliers.name == sup, "id"].iloc[0]), inv_no,
+                        [{"product_id": int(name_to_id[r["medicine"]]),
+                          "batch_no": str(r["batch_no"]).strip().upper(),
+                          "expiry": str(pd.to_datetime(r["expiry"]).date()), "qty": int(r["qty"]),
+                          "free_qty": int(r["free_qty"] or 0), "rate": float(r["rate"]),
+                          "mrp": float(r["mrp"]), "gst_rate": float(r["gst_rate"])}
+                         for _, r in edited.iterrows()],
+                        order_date=bill.bill_date)
+                    st.success(f"Purchase #{pid} saved from scanned bill - stock updated.")
+                    st.session_state.pop("ocr_img", None)
+                except ValueError as e:
+                    st.error(str(e))
 
 with tab_hist:
     h = db.q("""SELECT pu.id, pu.received_date, s.name AS supplier, pu.invoice_no, pu.ordered_qty,

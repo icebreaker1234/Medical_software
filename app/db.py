@@ -463,9 +463,11 @@ def seed(days: int = 180, seed_value: int = 7) -> None:
     # a few credit-customer payments and pending expiry claims
     credit = cur.execute("SELECT customer_id, SUM(total) FROM sales WHERE payment_mode='Credit'"
                          " GROUP BY customer_id").fetchall()
-    for c, amt in credit:
+    for c, amt in credit:          # varied repayment behaviour -> realistic udhaar ageing
+        paid_days_ago = int(rng.choice([3, 8, 20, 35, 50, 75]))
+        share = float(rng.choice([0.3, 0.5, 0.6, 0.8]))
         cur.execute("INSERT INTO customer_payments(customer_id,ts,amount,mode) VALUES (?,?,?,?)",
-                    (c, f"{end - timedelta(days=5)} 18:00:00", round(amt * 0.6, 0), "UPI"))
+                    (c, f"{end - timedelta(days=paid_days_ago)} 18:00:00", round(amt * share, 0), "UPI"))
     conn.commit()
     conn.close()
 

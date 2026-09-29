@@ -281,3 +281,25 @@ def attention_list(limit: int = 8) -> list[tuple[str, str]]:
         items.append(("warning", f"{inr(claims.v)} in expiry/breakage claims pending with suppliers "
                                  f"({int(claims.n)} returns)"))
     return items[:limit]
+
+
+def udhaar_ledger() -> pd.DataFrame:
+    """Credit (udhaar) balances with ageing, for payment reminders."""
+    df = db.q("""
+        SELECT c.id, c.name, c.phone,
+               COALESCE((SELECT SUM(total) FROM sales WHERE customer_id=c.id AND payment_mode='Credit'),0)
+             - COALESCE((SELECT SUM(amount) FROM customer_payments WHERE customer_id=c.id),0) AS outstanding,
+               (SELECT COUNT(*) FROM sales WHERE customer_id=c.id AND payment_mode='Credit') AS credit_bills,
+               (SELECT MAX(date(ts)) FROM sales WHERE customer_id=c.id AND payment_mode='Credit') AS last_credit_date,
+               (SELECT invoice_no FROM sales WHERE customer_id=c.id AND payment_mode='Credit'
+                ORDER BY ts DESC LIMIT 1) AS last_credit_bill,
+               (SELECT MAX(date(ts)) FROM customer_payments WHERE customer_id=c.id) AS last_payment_date
+        FROM customers c""")
+    df = df[df["outstanding"] > 1].copy()
+    if df.empty:
+        return df
+    since = df["last_payment_date"].fillna(df["last_credit_date"])
+    df["days_pending"] = (pd.Timestamp(db.today()) - pd.to_datetime(since)).dt.days.clip(lower=0)
+    df["ageing"] = pd.cut(df["days_pending"], [-1, 15, 30, 60, 10_000],
+                          labels=["0-15 days", "16-30 days", "31-60 days", "60+ days"]).astype(str)
+    return df.sort_values(["days_pending", "outstanding"], ascending=False)

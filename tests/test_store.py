@@ -72,3 +72,18 @@ def test_purchase_and_returns(store_db):
     assert db.fefo_batches(pid)["qty"].sum() == stock0 + 20
     with pytest.raises(ValueError):
         db.supplier_return(bid, 10_000, "Expired")
+
+
+def test_whatsapp_phone_and_message():
+    from app.whatsapp import bill_message, normalize_phone, wa_link
+    assert normalize_phone("9876543210") == "919876543210"
+    assert normalize_phone("+91 98765-43210") == "919876543210"
+    assert normalize_phone("09876543210") == "919876543210"
+    assert normalize_phone("12345") is None and normalize_phone("5876543210") is None
+    inv = {"invoice_no": "INV/2627/000001", "ts": "2026-09-29 10:00:00",
+           "lines": [{"product": "Paracetamol 650mg Tab", "qty": 2, "amount": 66.0}],
+           "totals": {"gross": 66.0, "disc": 0.0, "total": 66.0}}
+    msg = bill_message(inv, "Test Store", "Ramesh")
+    assert "INV/2627/000001" in msg and "Rs 66.00" in msg and "Paracetamol" in msg
+    assert "Paracetamol" not in bill_message(inv, "Test Store", include_items=False)
+    assert wa_link("919876543210", msg).startswith("https://wa.me/919876543210?text=")

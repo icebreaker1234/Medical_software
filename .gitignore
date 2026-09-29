@@ -10,3 +10,5 @@ models/*.joblib
 models/*.csv
 reports/*.html
 .pytest_cache/
+.DS_Store
+automation_update.zip
