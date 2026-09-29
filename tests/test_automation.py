@@ -61,3 +61,61 @@ def test_ocr_end_to_end_on_sample_bill():
     assert bill.supplier == "Shree Balaji Pharma Distributors"
     assert [l.medicine for l in bill.lines] == ["Paracetamol 650mg Tab", "Hand Sanitizer 500ml"]
     assert bill.lines[1].gst_rate == 18.0 and bill.lines[0].qty == 50
+
+
+# ---------------------------------------------------------------- blurry-photo enhancement
+from PIL import ImageFilter  # noqa: E402
+
+from app.ocr import _interpret_numbers, deskew, image_quality, merge_bills, parse_bill as _pb  # noqa: E402
+
+_ITEMS = [dict(name="Paracetamol 650mg Tab", batch="PCM2609A", expiry="08/28", qty=50, free=5,
+               mrp=33.0, rate=24.1, gst=5),
+          dict(name="Montelukast + Levocetirizine Tab", batch="MLK7731", expiry="03/28", qty=20, free=0,
+               mrp=180.0, rate=131.5, gst=5),
+          dict(name="Hand Sanitizer 500ml", batch="HS7788", expiry="12/27", qty=10, free=0,
+               mrp=250.0, rate=160.0, gst=18)]
+
+
+def test_blur_is_detected():
+    clean = sample_invoice(_ITEMS, "Shree Balaji Pharma Distributors", "SB/26/1", date(2026, 9, 28))
+    blurry = clean.filter(ImageFilter.GaussianBlur(3))
+    assert image_quality(clean)["verdict"] == "good"
+    assert image_quality(blurry)["verdict"] in ("blurry", "very blurry")
+    assert image_quality(blurry)["blur_score"] < image_quality(clean)["blur_score"] / 5
+
+
+def test_deskew_recovers_tilt():
+    import numpy as np
+    img = sample_invoice(_ITEMS, "X", "SB/26/1", date(2026, 9, 28)).convert("L").rotate(
+        3, expand=True, fillcolor=255)
+    _, angle = deskew(np.asarray(img).astype("float32"))
+    assert abs(abs(angle) - 3) <= 0.5
+
+
+def test_lost_decimal_points_are_recovered_by_amount_check():
+    # blurry OCR: "131.50" read as "13150"; qty 20 x 131.50 x 1.05 = 2761.50 proves the fix
+    f = _interpret_numbers([(20, False), (0, False), (180.0, True), (13150, False), (5, False), (2761.5, True)])
+    assert f["ok"] and f["rate"] == 131.5 and f["mrp"] == 180.0 and f["qty"] == 20
+
+
+def test_broken_expiry_slash_and_letter_noise():
+    pl = parse_line("5 Hand Sanitizer 500ml HS0925 12727 1O O 250.00 160.00 18 1888.00", CATALOGUE)
+    assert pl.expiry == "2027-12-31" and pl.qty == 10 and pl.amount_check
+
+
+def test_merge_keeps_verified_reading():
+    a = _pb("1 Paracetamol 650mg Tab PCM2609A 08/28 50 5 3300 2410 5 1265.25", CATALOGUE)
+    b = _pb("1 Paracetamol 650mg Tab PCM2609A 08/28 50 5 33.00 24.10 5 1265.25", CATALOGUE)
+    merged = merge_bills([a, b])
+    assert len(merged.lines) == 1 and merged.lines[0].amount_check and merged.lines[0].rate == 24.1
+
+
+@pytest.mark.skipif(shutil.which("tesseract") is None, reason="tesseract not installed")
+def test_enhancement_reads_blurry_phone_photo():
+    from app.ocr import ocr_image, simulate_phone_photo
+    clean = sample_invoice(_ITEMS, "Shree Balaji Pharma Distributors", "SB/26/04812", date(2026, 9, 28))
+    photo = simulate_phone_photo(clean, blur=1.2, seed=3)
+    basic = _pb(ocr_image(photo, "basic", CATALOGUE).text, CATALOGUE)
+    auto = ocr_image(photo, "auto", CATALOGUE).bill
+    good = lambda b: sum(l.amount_check and l.medicine is not None for l in b.lines)  # noqa: E731
+    assert good(auto) >= max(2, good(basic))

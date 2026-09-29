@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from app import db
-from app.ocr import OCRUnavailable, parse_bill, run_ocr, sample_invoice
+from app.ocr import OCRUnavailable, ocr_image, sample_invoice, simulate_phone_photo
 from app.ui import inr, money_cols
 
 st.title("🚚 Purchases")
@@ -64,13 +64,18 @@ with tab_new:
             st.error(str(e))
 
 
-@st.cache_data(show_spinner=False)
-def _ocr_cached(img_bytes: bytes) -> str:
+OCR_MODES = {"Auto - try all filters, keep the best": "auto", "Basic (clean scans)": "basic",
+             "Sharpen": "sharpen", "Deblur": "deblur", "Strong deblur": "deblur_strong",
+             "Adaptive threshold (shadows)": "adaptive"}
+
+
+@st.cache_data(show_spinner=False, max_entries=10)
+def _ocr_cached(img_bytes: bytes, mode: str, catalogue: tuple, sup_names: tuple):
     from PIL import Image
-    return run_ocr(Image.open(io.BytesIO(img_bytes)))
+    return ocr_image(Image.open(io.BytesIO(img_bytes)), mode, list(catalogue), list(sup_names))
 
 
-def _demo_bill() -> bytes:
+def _demo_bill(blurry: bool = False) -> bytes:
     """A realistic distributor bill made from random catalogue items (for demos)."""
     rnd = random.Random()
     rows = products[products["mrp"] > 0].sample(rnd.randint(3, 6), random_state=rnd.randint(0, 9999))
@@ -84,6 +89,8 @@ def _demo_bill() -> bytes:
                       "gst": float(r["gst_rate"])})
     img = sample_invoice(items, rnd.choice(list(suppliers["name"])),
                          f"SB/26/{rnd.randint(10000, 99999)}", db.today() - timedelta(days=1))
+    if blurry:
+        img = simulate_phone_photo(img, blur=rnd.uniform(1.4, 2.0), seed=rnd.randint(0, 999))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
@@ -95,10 +102,13 @@ with tab_scan:
                "OCR can misread batch numbers and prices.")
     c1, c2 = st.columns([3, 1])
     up = c1.file_uploader("Bill photo / scan (JPG or PNG)", type=["jpg", "jpeg", "png"])
-    c2.write("")
     if c2.button("Try a sample bill", width="stretch"):
         st.session_state.ocr_img = _demo_bill()
-        st.session_state.pop("ocr_grid", None)
+    if c2.button("Try a blurry phone photo", width="stretch"):
+        st.session_state.ocr_img = _demo_bill(blurry=True)
+    mode_label = st.selectbox("Image enhancement", list(OCR_MODES), index=0,
+                              help="Auto runs 5 filter pipelines in parallel and keeps, for every line, "
+                                   "the reading whose numbers cross-check with the printed amount.")
     if up is not None:
         data = up.getvalue()
         if hashlib.md5(data).hexdigest() != st.session_state.get("ocr_img_hash"):
@@ -107,35 +117,57 @@ with tab_scan:
             st.session_state.pop("ocr_grid", None)
     img_bytes = st.session_state.get("ocr_img")
 
-    text = None
+    res = None
     if img_bytes:
         try:
-            with st.spinner("Reading the bill..."):
-                text = _ocr_cached(img_bytes)
+            with st.spinner("Enhancing the image and reading the bill (blurry photos take longer)..."):
+                res = _ocr_cached(img_bytes, OCR_MODES[mode_label], tuple(products["name"]),
+                                  tuple(suppliers["name"]))
         except OCRUnavailable as e:
             st.error(str(e))
-    if img_bytes and text is not None:
-        left, right = st.columns([2, 3])
-        left.image(img_bytes, caption="Bill image", width="stretch")
-        with right:
-            bill = parse_bill(text, list(products["name"]), list(suppliers["name"]))
-            sup_names = list(suppliers["name"])
-            sup = st.selectbox("Supplier", sup_names,
-                               index=sup_names.index(bill.supplier) if bill.supplier in sup_names else 0,
-                               key=f"ocr_sup_{hash(img_bytes)}")
-            inv_no = st.text_input("Supplier invoice no.", value=bill.invoice_no or "",
-                                   key=f"ocr_inv_{hash(img_bytes)}")
-            found = len(bill.lines)
-            matched = sum(1 for l in bill.lines if l.medicine)
-            st.metric("Lines read", f"{found}", f"{matched} matched to your medicine list", delta_color="off")
-            with st.expander("Raw OCR text"):
-                st.text(text)
+    if res is not None:
+        q = res.quality
+        verdict_msg = {"good": ("success", "Photo quality is good."),
+                       "blurry": ("warning", "Photo is blurry - enhancement filters applied."),
+                       "very blurry": ("error", "Photo is very blurry - some lines may be unreadable. "
+                                                "Retake if possible: hold the phone steady, tap to focus, "
+                                                "use good light and fill the frame with the bill."),
+                       "low resolution": ("warning", "Low-resolution image - upscaled before reading. "
+                                                     "Send the original photo, not a WhatsApp-compressed one."),
+                       "low contrast": ("warning", "Low contrast / shadows - lighting corrected.")}
+        kind, msg = verdict_msg.get(q["verdict"], ("info", q["verdict"]))
+        getattr(st, kind)(f"{msg}  Sharpness score {q['blur_score']} (below 6 = blurry) · "
+                          f"{q['width']}×{q['height']} px")
+
+        b1, b2 = st.columns(2)
+        b1.image(img_bytes, caption="Original photo", width="stretch")
+        b2.image(res.image, caption=f"Enhanced for OCR: {res.variant}", width="stretch")
+        with st.expander(f"How the image was improved ({len(res.tried)} filter pipelines tried)"):
+            st.markdown("**Best pipeline:** " + " → ".join(res.steps))
+            st.dataframe(pd.DataFrame(res.tried).rename(columns={
+                "variant": "pipeline", "lines": "lines read", "checked": "lines verified by amount",
+                "confidence": "OCR confidence %"}), hide_index=True, width="stretch")
+            st.caption("Lines from different pipelines are merged: for each medicine the reading whose "
+                       "qty × rate × (1+GST) matches the printed amount is kept.")
+            st.text(res.text)
+
+        bill = res.bill
+        sup_names = list(suppliers["name"])
+        c1, c2, c3 = st.columns(3)
+        sup = c1.selectbox("Supplier", sup_names,
+                           index=sup_names.index(bill.supplier) if bill.supplier in sup_names else 0,
+                           key=f"ocr_sup_{hash(img_bytes)}")
+        inv_no = c2.text_input("Supplier invoice no.", value=bill.invoice_no or "",
+                               key=f"ocr_inv_{hash(img_bytes)}")
+        verified = sum(l.amount_check for l in bill.lines)
+        c3.metric("Lines read", f"{len(bill.lines)}", f"{verified} verified by amount", delta_color="off")
 
         if not bill.lines:
             st.warning("No item lines found. Try a sharper, straight photo in good light, or enter the bill manually.")
         else:
             grid = pd.DataFrame([{
-                "check": "OK" if (l.medicine and l.match_score >= 0.8 and l.rate > 0) else "⚠ check",
+                "check": "✓ verified" if (l.medicine and l.match_score >= 0.8 and l.amount_check)
+                else "⚠ check",
                 "medicine": l.medicine, "read_as": l.product_text, "match_%": int(l.match_score * 100),
                 "batch_no": l.batch_no, "expiry": pd.to_datetime(l.expiry).date() if l.expiry else None,
                 "qty": l.qty, "free_qty": l.free_qty, "rate": l.rate, "mrp": l.mrp, "gst_rate": l.gst_rate,
