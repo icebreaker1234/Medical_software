@@ -1,0 +1,56 @@
+name: CI / CT pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "30 0 * * 1"     # weekly retrain + drift check (Monday 06:00 IST)
+  workflow_dispatch:
+
+jobs:
+  train-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Run ML pipeline (data -> features -> train -> drift)
+        run: python -m src.pipeline
+      - name: Quality gate - champion must beat naive baseline
+        run: |
+          python - <<'PY'
+          import json
+          m = json.load(open("models/metadata.json"))
+          champ = m["metrics"][m["champion"]]["wape"]
+          base = m["metrics"]["naive_seasonal"]["wape"]
+          print(f"champion WAPE={champ:.3f} baseline WAPE={base:.3f}")
+          assert champ < base, "Model is not better than the naive baseline - failing the build"
+          PY
+      - name: Unit + API + business-logic tests
+        run: pytest -q
+      - name: Upload model & reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-and-reports
+          path: |
+            models/
+            reports/
+
+  docker:
+    needs: train-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t pharmacy-mlops:${{ github.sha }} .
+      - name: Smoke test API container
+        run: |
+          docker run -d -p 8000:8000 --name api pharmacy-mlops:${{ github.sha }}
+          for i in $(seq 1 30); do curl -fs localhost:8000/health && break; sleep 2; done
+          curl -fs -X POST localhost:8000/predict -H 'content-type: application/json' \
+               -d '{"category":"N02BE","horizon":7}'

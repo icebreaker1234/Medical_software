@@ -1,0 +1,31 @@
+# Reproducible pipeline:  dvc repro   (or without DVC:  python -m src.pipeline)
+stages:
+  generate:
+    cmd: python -m src.data.generate
+    deps: [src/data/generate.py]
+    params: [data, categories]
+    outs: [data/raw/salesdaily.csv]
+  prepare:
+    cmd: python -m src.data.prepare
+    deps: [src/data/prepare.py, data/raw/salesdaily.csv]
+    outs: [data/processed/sales_daily_long.csv]
+  features:
+    cmd: python -m src.features.build
+    deps: [src/features/build.py, data/processed/sales_daily_long.csv]
+    params: [features]
+    outs: [data/processed/features.csv]
+  train:
+    cmd: python -m src.models.train
+    deps: [src/models/train.py, src/models/wrapper.py, data/processed/features.csv]
+    params: [train, forecast, mlflow]
+    outs: [models/model.joblib, models/metadata.json, models/reference_sales.csv]
+    metrics:
+      - reports/metrics.json:
+          cache: false
+  monitor:
+    cmd: python -m src.monitoring.drift
+    deps: [src/monitoring/drift.py, models/model.joblib, data/processed/sales_daily_long.csv]
+    params: [monitoring]
+    metrics:
+      - reports/drift.json:
+          cache: false

@@ -1,0 +1,90 @@
+{
+  "generated_at": "2026-09-29T14:46:53+00:00",
+  "current_window_days": 30,
+  "categories_checked": 8,
+  "categories_drifted": 4,
+  "retrain_recommended": true,
+  "details": [
+    {
+      "category": "M01AB",
+      "reference_mean": 11.13,
+      "current_mean": 10.81,
+      "mean_shift_pct": -2.9,
+      "psi": 0.161,
+      "ks_pvalue": 0.5941,
+      "drift": false
+    },
+    {
+      "category": "M01AE",
+      "reference_mean": 9.4,
+      "current_mean": 10.97,
+      "mean_shift_pct": 16.7,
+      "psi": 0.139,
+      "ks_pvalue": 0.135,
+      "drift": false
+    },
+    {
+      "category": "N02BA",
+      "reference_mean": 6.03,
+      "current_mean": 6.43,
+      "mean_shift_pct": 6.6,
+      "psi": 0.031,
+      "ks_pvalue": 1.0,
+      "drift": false
+    },
+    {
+      "category": "N02BE",
+      "reference_mean": 90.61,
+      "current_mean": 110.51,
+      "mean_shift_pct": 22.0,
+      "psi": 0.678,
+      "ks_pvalue": 0.0709,
+      "drift": true
+    },
+    {
+      "category": "N05B",
+      "reference_mean": 17.83,
+      "current_mean": 15.0,
+      "mean_shift_pct": -15.9,
+      "psi": 0.701,
+      "ks_pvalue": 0.2391,
+      "drift": true
+    },
+    {
+      "category": "N05C",
+      "reference_mean": 2.8,
+      "current_mean": 2.17,
+      "mean_shift_pct": -22.6,
+      "psi": 0.385,
+      "ks_pvalue": 0.3929,
+      "drift": true
+    },
+    {
+      "category": "R03",
+      "reference_mean": 13.57,
+      "current_mean": 13.1,
+      "mean_shift_pct": -3.4,
+      "psi": 0.198,
+      "ks_pvalue": 0.808,
+      "drift": false
+    },
+    {
+      "category": "R06",
+      "reference_mean": 13.1,
+      "current_mean": 12.2,
+      "mean_shift_pct": -6.9,
+      "psi": 0.274,
+      "ks_pvalue": 0.5941,
+      "drift": true
+    }
+  ],
+  "reference_window": "2025-08-30 -> 2025-09-28",
+  "current_window": "2026-08-30 -> 2026-09-28",
+  "performance": {
+    "recent_wape": 0.3618,
+    "holdout_wape": 0.339,
+    "degradation_pct": 6.7,
+    "alert": false
+  },
+  "evidently_report": "/Users/manthankhandelwal/Downloads/pharmacy-mlops/reports/drift_report.html"
+}

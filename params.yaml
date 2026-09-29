@@ -1,0 +1,46 @@
+# Central configuration for the whole pipeline (read by src/config.py and DVC).
+
+data:
+  source: synthetic            # "synthetic" or "kaggle"
+  kaggle_path: data/raw/salesdaily.csv   # Kaggle "Pharma sales data" daily file, if you download it
+  start_date: "2022-01-01"     # synthetic data start
+  end_date: null               # null = yesterday
+  seed: 42
+
+categories:                    # ATC drug categories used in the Kaggle dataset
+  - M01AB   # anti-inflammatory, acetic acid derivatives (e.g. diclofenac)
+  - M01AE   # anti-inflammatory, propionic acid derivatives (e.g. ibuprofen)
+  - N02BA   # analgesics, salicylic acid (e.g. aspirin)
+  - N02BE   # analgesics, anilides (e.g. paracetamol)
+  - N05B    # anxiolytics
+  - N05C    # hypnotics and sedatives
+  - R03     # drugs for obstructive airway diseases
+  - R06     # antihistamines for systemic use
+
+features:
+  lags: [1, 7, 14, 28]
+  windows: [7, 28]
+
+train:
+  test_days: 90
+  xgb:
+    n_estimators: 400
+    max_depth: 5
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+    min_child_weight: 3
+
+forecast:
+  horizon: 14
+  interval: 0.80               # 80% prediction interval
+
+mlflow:
+  tracking_uri: sqlite:///mlflow.db
+  experiment: pharmacy-demand-forecasting
+  model_name: pharmacy-demand-forecaster
+
+monitoring:
+  current_days: 30             # recent window compared with the training reference
+  psi_threshold: 0.25
+  ks_pvalue_threshold: 0.05

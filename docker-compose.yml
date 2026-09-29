@@ -1,0 +1,17 @@
+services:
+  api:
+    build: .
+    image: pharmacy-mlops:latest
+    ports: ["8000:8000"]
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+  dashboard:
+    image: pharmacy-mlops:latest
+    depends_on: [api]
+    ports: ["8501:8501"]
+    environment:
+      API_URL: http://api:8000
+    command: streamlit run app/main.py --server.address 0.0.0.0 --server.port 8501 --server.headless true
+  mlflow:
+    image: pharmacy-mlops:latest
+    ports: ["5000:5000"]
+    command: mlflow ui --backend-store-uri sqlite:///mlflow.db --host 0.0.0.0 --port 5000

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+mlruns/
+mlflow.db
+data/raw/
+data/processed/
+data/pharmacy.db*
+models/*.joblib
+models/*.csv
+reports/*.html
+.pytest_cache/

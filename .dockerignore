@@ -1,0 +1,13 @@
+.git
+.venv
+__pycache__
+.pytest_cache
+mlruns
+mlflow.db
+data/raw
+data/processed
+data/pharmacy.db*
+models/*.joblib
+models/*.csv
+models/*.json
+reports
