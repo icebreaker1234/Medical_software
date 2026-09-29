@@ -14,7 +14,7 @@ import urllib.parse
 
 import qrcode
 
-STORE_UPI_ID = os.getenv("STORE_UPI_ID", "sanjeevanimedical@okaxis")   # demo value - replace
+STORE_UPI_ID = os.getenv("manthankhandelwal93-1@okicici", "sanjeevanimedical@okaxis")   # demo value - replace
 UPI_ID_PATTERN = re.compile(r"^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}$")
 
 
