@@ -32,6 +32,7 @@ pages = {
         st.Page("pages/reports.py", title="Reports & GST", icon="📊"),
     ],
     "Intelligence": [
+        st.Page("pages/substitutes.py", title="Substitutes & Missed Demand", icon="🔁"),
         st.Page("pages/expiry.py", title="Expiry & Dead Stock", icon="⏳"),
         st.Page("pages/forecast.py", title="Demand Forecast & Reorder", icon="📈"),
     ],

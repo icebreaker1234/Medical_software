@@ -223,6 +223,10 @@ def reorder_suggestions(category_forecasts: dict[str, pd.DataFrame] | None = Non
     share["share"] = share["units"] / share.groupby("category")["units"].transform("sum")
     st = st.merge(share[["product_id", "share"]], left_on="id", right_on="product_id",
                   how="left", suffixes=("", "_s")).fillna({"share": 0})
+    # demand we MISSED while out of stock (logged at the counter) - sales data can't see it
+    from app.substitutes import missed_units_per_product
+    missed = missed_units_per_product(30).rename(columns={"product_id": "pid_m"})
+    st = st.merge(missed, left_on="id", right_on="pid_m", how="left").fillna({"missed_units": 0})
     rows = []
     for _, r in st.iterrows():
         lead = int(r["lead_time_days"] or 2)
@@ -237,11 +241,15 @@ def reorder_suggestions(category_forecasts: dict[str, pd.DataFrame] | None = Non
             demand = r["per_day"] * horizon
             upper = demand * 1.3
             method = "30-day average"
+        missed_per_day = r["missed_units"] / 30
+        demand += missed_per_day * horizon
+        upper += missed_per_day * horizon
         safety = max(upper - demand, 0) * 0.5
         qty = int(np.ceil(max(demand + safety - r["stock"], 0)))
         if qty > 0 and demand > 0.5:
             rows.append({"product": r["name"], "category": r["category"], "stock": int(r["stock"]),
                          "sales_per_day": round(r["per_day"], 2),
+                         "missed_30d": int(r["missed_units"]),
                          "lead_time_days": lead, "demand_lead+cover": round(demand, 1), "safety_stock": round(safety, 1),
                          "suggested_qty": qty, "supplier": r["preferred_supplier"],
                          "est_stockout": r["stockout_date"], "method": method})

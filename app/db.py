@@ -18,6 +18,8 @@ from datetime import date, datetime, timedelta
 import numpy as np
 import pandas as pd
 
+from app.composition import (describe, infer_from_product, load_brand_master,
+                             lookup_brand)
 from src.config import DAILY_LONG, PHARMACY_DB
 
 SCHEMA = """
@@ -29,7 +31,8 @@ CREATE TABLE IF NOT EXISTS products (
     manufacturer TEXT, hsn TEXT DEFAULT '3004', gst_rate REAL DEFAULT 5,
     schedule TEXT DEFAULT 'OTC', pack TEXT, barcode TEXT UNIQUE, rack TEXT,
     reorder_level INTEGER DEFAULT 10, default_mrp REAL, chronic INTEGER DEFAULT 0,
-    preferred_supplier_id INTEGER REFERENCES suppliers(id));
+    preferred_supplier_id INTEGER REFERENCES suppliers(id),
+    composition TEXT, dosage_form TEXT, release_type TEXT DEFAULT 'IR', comp_key TEXT);
 CREATE TABLE IF NOT EXISTS batches (
     id INTEGER PRIMARY KEY, product_id INTEGER NOT NULL REFERENCES products(id),
     batch_no TEXT NOT NULL, expiry TEXT NOT NULL, mrp REAL NOT NULL,
@@ -71,7 +74,17 @@ CREATE TABLE IF NOT EXISTS stock_movements (
     id INTEGER PRIMARY KEY, ts TEXT NOT NULL, batch_id INTEGER REFERENCES batches(id),
     product_id INTEGER REFERENCES products(id), qty_change INTEGER NOT NULL,
     type TEXT NOT NULL, ref TEXT, note TEXT, user TEXT DEFAULT 'system');
+-- customer asked for something we could not give from stock (substituted / lost / ordered)
+CREATE TABLE IF NOT EXISTS unmet_demand (
+    id INTEGER PRIMARY KEY, ts TEXT NOT NULL, requested TEXT NOT NULL,
+    requested_product_id INTEGER REFERENCES products(id), composition TEXT, comp_key TEXT,
+    qty INTEGER NOT NULL DEFAULT 1,
+    reason TEXT NOT NULL,            -- out_of_stock | not_stocked | unknown
+    outcome TEXT NOT NULL,           -- substituted | lost | ordered
+    given_product_id INTEGER REFERENCES products(id), pharmacist TEXT, note TEXT,
+    est_value REAL);
 CREATE INDEX IF NOT EXISTS ix_sales_ts ON sales(ts);
+CREATE INDEX IF NOT EXISTS ix_unmet_ts ON unmet_demand(ts);
 CREATE INDEX IF NOT EXISTS ix_si_sale ON sale_items(sale_id);
 CREATE INDEX IF NOT EXISTS ix_si_prod ON sale_items(product_id);
 CREATE INDEX IF NOT EXISTS ix_batch_prod ON batches(product_id);
@@ -132,7 +145,25 @@ CATALOGUE = [
     ("Herbal Cough Syrup 100ml", "Herbal", "R05 Cough", "OTC", 5, "100 ml", 95, 0, 0.0),
     ("Knee Support (L)", "Orthopaedic aid", "Non-drug", "OTC", 12, "1 pc", 450, 0, 0.0),
     ("Calcium + D3 Tab", "Calcium carbonate/D3", "A11 Vitamins", "OTC", 5, "15 tab", 115, 0, 0.15),
+    # alternate brands (same formula, other manufacturers) - used by the substitute finder
+    ("Vedant Paracetamol 650 Tab", "Paracetamol", "N02BE", "OTC", 5, "15 tab", 28, 0, 3),
+    ("Kiran Aceclo-P Tab", "Aceclofenac/Paracetamol", "M01AB", "H", 5, "10 tab", 62, 0, 2),
+    ("Vedant Ibu-Para Tab", "Ibuprofen/Paracetamol", "M01AE", "H", 5, "15 tab", 28, 0, 2),
+    ("Kiran Montelukast-LC Tab", "Montelukast/Levocetirizine", "R03", "H", 5, "10 tab", 150, 0, 2),
+    ("Arogya Pantoprazole 40 Tab", "Pantoprazole", "A02 Acid disorders", "H", 5, "15 tab", 110, 0, 1.5),
+    ("Sanjeevani Amlodipine 5 Tab", "Amlodipine", "C Cardiovascular", "H", 5, "15 tab", 32, 1, 1.5),
+    ("Vedant Cetirizine 10 Tab", "Cetirizine", "R06", "OTC", 5, "10 tab", 15, 0, 2),
+    ("Kiran Azithro 500 Tab", "Azithromycin", "J01 Antibiotics", "H", 5, "3 tab", 65, 0, 1.0),
+    ("Arogya Metformin SR 500 Tab", "Metformin", "A10 Diabetes", "H", 5, "20 tab", 38, 1, 1.5),
+    ("Sanjeevani Alprazolam 0.25 Tab", "Alprazolam", "N05B", "H1", 5, "10 tab", 22, 0, 1.5),
+    ("Vedant Theo-Eto Tab", "Etofylline/Theophylline", "R03", "H", 5, "30 tab", 22, 1, 1.0),
 ]
+# demo "customer asked for X" history: brand asked -> (requests/day, share substituted)
+UNMET_SCENARIOS = [("Dolo 650", 1.2, 0.9), ("Combiflam", 0.5, 0.85), ("Zerodol-P", 0.4, 0.85),
+                   ("Montair LC", 0.35, 0.8), ("Pan 40", 0.4, 0.85), ("Telma 40", 0.2, 0.8),
+                   ("Thyronorm 50", 0.45, 0.0), ("Augmentin 625 Duo", 0.35, 0.0),
+                   ("Meftal Spas", 0.3, 0.0), ("Razo 20", 0.25, 0.0), ("Ondem 4", 0.2, 0.0),
+                   ("Allegra 180", 0.12, 0.0)]
 MODEL_CATEGORIES = ["M01AB", "M01AE", "N02BA", "N02BE", "N05B", "N05C", "R03", "R06"]
 
 SUPPLIERS = [  # name, city, lead time mean, fill-rate, credit days
@@ -149,6 +180,8 @@ LAST = ["Sharma", "Agarwal", "Jain", "Gupta", "Meena", "Choudhary", "Singh", "Ve
         "Khandelwal", "Mathur", "Joshi"]
 DOCTORS = ["Dr. A. Mehta (MBBS, MD)", "Dr. S. Rathore (MBBS)", "Dr. P. Bansal (MD Med)",
            "Dr. K. Purohit (MS Ortho)", "Dr. R. Kothari (MD Psych)", "Dr. V. Tak (MBBS, DCH)"]
+MAKERS = {"Arogya": "Arogya Pharma", "Sanjeevani": "Sanjeevani Labs",
+          "Vedant": "Vedant Remedies", "Kiran": "Kiran Lifesciences"}
 PAYMENT_MODES = ["Cash", "UPI", "Card", "Credit"]
 
 
@@ -220,11 +253,30 @@ def init_db(force: bool = False) -> None:
             if p.exists():
                 p.unlink()
     conn = connect()
-    conn.executescript(SCHEMA)
+    migrate(conn)
     seeded = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0] > 0
     conn.close()
     if not seeded:
         seed()
+
+
+def migrate(conn) -> None:
+    """Bring an older database up to the current schema without losing data."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(products)")}
+    if cols:                                         # existing DB created by an older version
+        for col, typ in (("composition", "TEXT"), ("dosage_form", "TEXT"),
+                         ("release_type", "TEXT DEFAULT 'IR'"), ("comp_key", "TEXT")):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE products ADD COLUMN {col} {typ}")
+    conn.executescript(SCHEMA)                       # creates any new tables / indexes
+    missing = conn.execute("SELECT id, name, generic FROM products WHERE comp_key IS NULL").fetchall()
+    for r in missing:
+        d = infer_from_product(r["name"], r["generic"])
+        if d:
+            conn.execute("UPDATE products SET composition=?, dosage_form=?, release_type=?, comp_key=? "
+                         "WHERE id=?", (d["composition"], d["dosage_form"], d["release_type"],
+                                        d["comp_key"], r["id"]))
+    conn.commit()
 
 
 def seed(days: int = 180, seed_value: int = 7) -> None:
@@ -250,13 +302,18 @@ def seed(days: int = 180, seed_value: int = 7) -> None:
         cur.execute("INSERT INTO products(id,name,generic,category,manufacturer,hsn,gst_rate,"
                     "schedule,pack,barcode,rack,reorder_level,default_mrp,chronic,"
                     "preferred_supplier_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (i, name, generic, cat, rng.choice(["Arogya Pharma", "Sanjeevani Labs",
-                     "Vedant Remedies", "Kiran Lifesciences"]),
+                    (i, name, generic, cat, MAKERS.get(name.split()[0]) or rng.choice(list(MAKERS.values())),
                      "3004" if gst == 5 else "9025" if "Thermo" in name else "3808",
                      gst, sch, pack, f"890{1000000000 + i * 7919}", f"R{1 + i % 6}-S{1 + i % 4}",
                      10, mrp, chronic, pref))
+        comp = infer_from_product(name, generic)
+        if comp:
+            cur.execute("UPDATE products SET composition=?, dosage_form=?, release_type=?, comp_key=? "
+                        "WHERE id=?", (comp["composition"], comp["dosage_form"], comp["release_type"],
+                                       comp["comp_key"], i))
         prod.append({"id": i, "name": name, "cat": cat, "mrp": mrp, "gst": gst, "w": w,
-                     "chronic": chronic, "pref": pref, "schedule": sch})
+                     "chronic": chronic, "pref": pref, "schedule": sch,
+                     "comp_key": comp["comp_key"] if comp else None})
 
     # customers
     customers = []
@@ -460,6 +517,44 @@ def seed(days: int = 180, seed_value: int = 7) -> None:
     moves.sort(key=lambda m: m[0])
     cur.executemany("INSERT INTO stock_movements(ts,batch_id,product_id,qty_change,type,ref,note)"
                     " VALUES (?,?,?,?,?,?,?)", moves)
+    # customers asking for brands we don't have (substituted from stock, lost or ordered)
+    master = load_brand_master()
+    by_key: dict[str, list] = {}
+    for p in prod:
+        if p["comp_key"]:
+            by_key.setdefault(p["comp_key"], []).append(p)
+    unmet_rows = []
+    for brand, rate, sub_share in UNMET_SCENARIOS:
+        b = lookup_brand(brand, master)
+        subs = by_key.get(b["comp_key"], []) if b else []
+        for di, d in enumerate(dates[-60:]):
+            for _ in range(int(rng.poisson(rate))):
+                qty = int(rng.choice([1, 1, 1, 2, 2, 3]))
+                ts = f"{d} {int(rng.integers(9, 21)):02d}:{int(rng.integers(0, 60)):02d}:00"
+                if subs and rng.random() < sub_share:
+                    g = subs[int(rng.integers(0, len(subs)))]
+                    unmet_rows.append([ts, brand, None, b["composition"], b["comp_key"], qty,
+                                       "not_stocked", "substituted", g["id"], "counter", None,
+                                       round(g["mrp"] * qty, 2)])
+                else:
+                    outcome = "ordered" if rng.random() < 0.3 else "lost"
+                    unmet_rows.append([ts, brand, None, b["composition"] if b else None,
+                                       b["comp_key"] if b else None, qty, "not_stocked", outcome,
+                                       None, "counter", None, None])
+    # earlier stock-outs of products we DO stock (feeds 'missed demand' into reorder)
+    for name, rate in (("Cefpodoxime 200mg Tab", 0.3), ("Salbutamol Inhaler 100mcg", 0.25)):
+        p = next(x for x in prod if x["name"] == name)
+        comp = infer_from_product(name, None)
+        for d in dates[-30:]:
+            for _ in range(int(rng.poisson(rate))):
+                ts = f"{d} {int(rng.integers(9, 21)):02d}:{int(rng.integers(0, 60)):02d}:00"
+                unmet_rows.append([ts, name, p["id"], comp["composition"], comp["comp_key"],
+                                   int(rng.choice([1, 1, 2])), "out_of_stock",
+                                   "ordered" if rng.random() < 0.4 else "lost", None, "counter",
+                                   None, None])
+    cur.executemany("INSERT INTO unmet_demand(ts,requested,requested_product_id,composition,comp_key,"
+                    "qty,reason,outcome,given_product_id,pharmacist,note,est_value) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", unmet_rows)
     # a few credit-customer payments and pending expiry claims
     credit = cur.execute("SELECT customer_id, SUM(total) FROM sales WHERE payment_mode='Credit'"
                          " GROUP BY customer_id").fetchall()
@@ -477,6 +572,7 @@ def products_df() -> pd.DataFrame:
     return q("""
         SELECT p.id, p.name, p.generic, p.category, p.schedule, p.gst_rate, p.pack, p.barcode,
                p.rack, p.reorder_level, p.default_mrp AS mrp, p.chronic,
+               p.composition, p.dosage_form, p.release_type, p.comp_key,
                s.name AS preferred_supplier, s.lead_time_days,
                COALESCE(SUM(CASE WHEN b.expiry > date('now','localtime') THEN b.qty END),0) AS stock,
                COALESCE(SUM(CASE WHEN b.expiry <= date('now','localtime') THEN b.qty END),0) AS expired_qty,
@@ -718,6 +814,16 @@ def add_supplier(name, gstin, phone, city, lead_time_days, credit_days) -> int:
 
 
 def add_product(**kw) -> int:
+    """Insert a product. Composition fields are filled automatically when possible."""
+    if kw.get("composition"):
+        d = describe(kw["composition"], kw.get("dosage_form"), kw.get("release_type") or "IR")
+        kw.update(dosage_form=d["dosage_form"], release_type=d["release_type"], comp_key=d["comp_key"])
+    else:
+        d = infer_from_product(kw.get("name", ""), kw.get("generic"))
+        if d:
+            kw.update(composition=d["composition"], dosage_form=d["dosage_form"],
+                      release_type=d["release_type"], comp_key=d["comp_key"])
+    kw = {k: v for k, v in kw.items() if v is not None}
     cols = ",".join(kw)
     with tx() as conn:
         return conn.execute(f"INSERT INTO products({cols}) VALUES ({','.join('?' * len(kw))})",
@@ -728,3 +834,23 @@ def record_payment(customer_id: int, amount: float, mode: str) -> None:
     with tx() as conn:
         conn.execute("INSERT INTO customer_payments(customer_id,ts,amount,mode) VALUES (?,?,?,?)",
                      (customer_id, now_ts(), amount, mode))
+
+
+def log_unmet(requested: str, qty: int, reason: str, outcome: str,
+              requested_product_id: int | None = None, composition: str | None = None,
+              comp_key: str | None = None, given_product_id: int | None = None,
+              pharmacist: str = "counter", note: str | None = None,
+              est_value: float | None = None) -> int:
+    """Record a request we could not fill from the asked-for product."""
+    if reason not in ("out_of_stock", "not_stocked", "unknown"):
+        raise ValueError("bad reason")
+    if outcome not in ("substituted", "lost", "ordered"):
+        raise ValueError("bad outcome")
+    if outcome == "substituted" and not given_product_id:
+        raise ValueError("Substitution needs the product that was given")
+    with tx() as conn:
+        return conn.execute(
+            "INSERT INTO unmet_demand(ts,requested,requested_product_id,composition,comp_key,qty,"
+            "reason,outcome,given_product_id,pharmacist,note,est_value) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (now_ts(), requested, requested_product_id, composition, comp_key, int(qty), reason,
+             outcome, given_product_id, pharmacist, note, est_value)).lastrowid

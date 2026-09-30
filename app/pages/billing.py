@@ -5,6 +5,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from app import db
+from app.sub_ui import render_panel
 from app.ui import STORE_DL, STORE_GSTIN, STORE_NAME, inr
 from app.upi import STORE_UPI_ID, is_demo_upi, qr_data_uri, qr_png, upi_link
 from app.whatsapp import bill_message, normalize_phone, wa_link
@@ -94,21 +95,29 @@ with tab_bill:
             match = exact if len(exact) else products[products["name"].str.lower().apply(
                 lambda n: all(w in n for w in words))]
             if match.empty:
-                st.error(f"No medicine found for '{code}'")
+                # not a stocked product: maybe a brand we don't keep -> same-formula options
+                st.session_state.sub_req = {"query": code.strip(), "qty": int(qty),
+                                            "reason": "not_stocked"}
             else:
                 p = match.iloc[0]
                 if p["stock"] < qty:
-                    st.warning(f"Only {int(p['stock'])} in stock for {p['name']}.")
-                    alts = products[(products["generic"] == p["generic"]) & (products["id"] != p["id"])
-                                    & (products["stock"] > 0)]
-                    if len(alts):
-                        st.info("Same-composition alternatives in stock: " +
-                                ", ".join(f"{a} ({int(s)})" for a, s in zip(alts["name"], alts["stock"])))
-                    if p["stock"] == 0:
-                        st.stop()
-                add_to_cart(int(p["id"]), int(min(qty, p["stock"])))
+                    short = int(qty - p["stock"])
+                    st.session_state.sub_req = {"query": p["name"], "qty": short,
+                                                "reason": "out_of_stock"}
+                    if p["stock"] > 0:
+                        add_to_cart(int(p["id"]), int(p["stock"]))
+                        st.warning(f"Added the {int(p['stock'])} available of {p['name']}; "
+                                   f"{short} short - see same-formula options below.")
+                else:
+                    add_to_cart(int(p["id"]), int(qty))
                 if len(match) > 1:
                     st.caption("Also matched: " + ", ".join(match["name"].iloc[1:5]))
+
+        if st.session_state.get("sub_req"):
+            r = st.session_state.sub_req
+            render_panel(r["query"], r["qty"], r["reason"], key="bill_sub",
+                         on_give=add_to_cart,
+                         on_close=lambda: st.session_state.pop("sub_req", None))
 
         opts = {f"{r['name']}  ·  stock {int(r['stock'])}  ·  ₹{r['mrp']:.0f}  ·  {r['rack']}": int(r["id"])
                 for _, r in products.iterrows()}

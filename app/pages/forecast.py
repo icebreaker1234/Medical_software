@@ -3,6 +3,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from app import analytics
+from app import substitutes as S
 from app.db import MODEL_CATEGORIES
 from app.ui import all_forecasts, get_forecast
 from src.models.predict import load_history, load_model
@@ -60,11 +61,18 @@ else:
         "suggested_qty": st.column_config.NumberColumn("Suggested order", format="%d")})
     st.download_button("⬇ Download purchase list (CSV)", sug.to_csv(index=False),
                        "purchase_suggestions.csv", "text/csv")
+new_items = S.top_unavailable(30)
+new_items = new_items[new_items["action"] == S.ACTIONS["new"]]
+if len(new_items):
+    st.markdown("**Customers keep asking for these - we don't stock the formula**")
+    st.dataframe(new_items[["formula", "asked_as", "requests", "units"]], hide_index=True, width="stretch")
 with st.expander("How are suggestions calculated?"):
     st.markdown("""
 * **Demand** over *supplier lead time + cover days*:
   * ML categories → category forecast × the product's share of that category (last 60 days)
   * other products → 30-day average daily sales
 * **Safety stock** = half the gap between the upper prediction bound and the forecast
+* **Missed demand**: units customers asked for while we were out of stock (logged at billing)
+  are added back, because sales data alone hides that demand
 * **Suggested qty** = demand + safety stock − current non-expired stock
 """)

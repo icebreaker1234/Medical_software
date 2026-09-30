@@ -1,6 +1,7 @@
 import streamlit as st
 
 from app import analytics, db
+from app.composition import describe
 from app.ui import inr, money_cols
 
 st.title("📦 Inventory")
@@ -26,7 +27,7 @@ with tab_stock:
     c1.metric("Products", len(view))
     c2.metric("Stock value (cost)", inr(view["stock_value_cost"].sum()))
     c3.metric("Below cover target", int((view["status"] != "OK").sum()))
-    cols = ["name", "generic", "category", "schedule", "rack", "stock", "expired_qty", "per_day",
+    cols = ["name", "composition", "category", "schedule", "rack", "stock", "expired_qty", "per_day",
             "days_cover", "stockout_date", "next_expiry", "stock_value_cost", "status"]
     st.dataframe(view[cols].round(1), hide_index=True, width="stretch", height=480,
                  column_config={**money_cols(view, ["stock_value_cost"]),
@@ -78,7 +79,13 @@ with tab_new:
     with st.form("newprod"):
         c1, c2 = st.columns(2)
         name = c1.text_input("Brand / product name")
-        generic = c2.text_input("Composition (generic)")
+        generic = c2.text_input("Composition with strength",
+                                placeholder="e.g. Paracetamol 650mg  or  Aceclofenac 100mg + Paracetamol 325mg")
+        form = c1.selectbox("Dosage form", ["tablet", "capsule", "syrup", "suspension", "inhaler", "gel",
+                                            "cream", "ointment", "drops", "injection", "sachet",
+                                            "dispersible tablet", "other"])
+        release = c2.selectbox("Release", ["IR", "SR", "ER", "CR", "MR", "DR"],
+                               help="IR = plain. SR/ER/CR/MR/DR are never swapped with plain tablets.")
         cat = c1.text_input("Category / ATC", "N02BE")
         sch = c2.selectbox("Schedule", ["OTC", "H", "H1", "X"])
         gst = c1.selectbox("GST %", [5, 12, 18, 0])
@@ -91,7 +98,10 @@ with tab_new:
         chronic = c2.checkbox("Chronic / regular-refill medicine")
         if st.form_submit_button("Add medicine", type="primary") and name:
             try:
-                db.add_product(name=name, generic=generic, category=cat, schedule=sch, gst_rate=gst,
+                comp = describe(generic, None if form == "other" else form, release)
+                db.add_product(name=name, generic=comp["salts"].title() or generic,
+                               composition=generic or None, dosage_form=comp["dosage_form"],
+                               release_type=release, category=cat, schedule=sch, gst_rate=gst,
                                hsn=hsn, pack=pack, default_mrp=mrp, barcode=barcode or None,
                                rack=rack, chronic=int(chronic),
                                preferred_supplier_id=int(sups.loc[sups.name == sup, "id"].iloc[0]))
