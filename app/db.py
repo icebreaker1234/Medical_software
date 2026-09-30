@@ -97,6 +97,10 @@ CREATE TABLE IF NOT EXISTS supplier_payment_allocations (
     purchase_id INTEGER NOT NULL REFERENCES purchases(id), amount REAL NOT NULL CHECK (amount > 0));
 CREATE INDEX IF NOT EXISTS ix_sp_sup ON supplier_payments(supplier_id);
 CREATE INDEX IF NOT EXISTS ix_spa_pur ON supplier_payment_allocations(purchase_id);
+-- files loaded through the import connector (one row per import)
+CREATE TABLE IF NOT EXISTS imports (
+    id INTEGER PRIMARY KEY, ts TEXT NOT NULL, file_name TEXT, file_hash TEXT, dataset TEXT NOT NULL,
+    rows_in INTEGER, created INTEGER, updated INTEGER, skipped INTEGER, user TEXT, summary TEXT);
 CREATE INDEX IF NOT EXISTS ix_sales_ts ON sales(ts);
 CREATE INDEX IF NOT EXISTS ix_unmet_ts ON unmet_demand(ts);
 CREATE INDEX IF NOT EXISTS ix_si_sale ON sale_items(sale_id);
@@ -203,15 +207,27 @@ PAYMENT_MODES = ["Cash", "UPI", "Card", "Credit"]
 _MIGRATED: set = set()
 
 
+def db_file():
+    """The logged-in store's own database file; the shared demo file in demo mode / tests."""
+    from app import tenancy
+    path = tenancy.db_path()
+    if path:
+        return path
+    if tenancy.mode() == "stores" and tenancy._session_state() is not None:
+        raise PermissionError("No store selected - please log in")
+    return PHARMACY_DB
+
+
 def connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(PHARMACY_DB, timeout=10, detect_types=0)
+    path = db_file()
+    conn = sqlite3.connect(path, timeout=10, detect_types=0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     # Streamlit Cloud hot-reloads new code without restarting the server, so the
     # start-up init may not run again: upgrade an older database on first use.
-    if str(PHARMACY_DB) not in _MIGRATED:
-        _MIGRATED.add(str(PHARMACY_DB))
+    if str(path) not in _MIGRATED:
+        _MIGRATED.add(str(path))
         migrate(conn)
     return conn
 
@@ -267,6 +283,29 @@ def next_invoice_no(conn, d: date) -> str:
 
 
 # ------------------------------------------------------------------ seeding
+def is_empty() -> bool:
+    conn = connect()
+    try:
+        return conn.execute("SELECT COUNT(*) FROM products").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def wipe_store() -> None:
+    """Replace the current store's database with an empty one (caller takes a backup first)."""
+    from pathlib import Path as _P
+    path = _P(db_file())
+    for ext in ("", "-wal", "-shm"):
+        f = path.with_name(path.name + ext)
+        if f.exists():
+            f.unlink()
+    conn = sqlite3.connect(path)
+    conn.executescript(SCHEMA)
+    conn.commit()
+    conn.close()
+    _MIGRATED.discard(str(path))
+
+
 def init_db(force: bool = False) -> None:
     if force and PHARMACY_DB.exists():
         PHARMACY_DB.unlink()

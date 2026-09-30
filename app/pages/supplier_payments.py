@@ -1,11 +1,12 @@
-from datetime import date, timedelta
+from datetime import timedelta
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
 from app import analytics, db
-from app.ui import STORE_NAME, inr, money_cols
+from app.tenancy import store_info
+from app.ui import inr, money_cols
 from app.whatsapp import normalize_phone, wa_link
 
 st.title("💸 Supplier Payments")
@@ -13,6 +14,10 @@ tab_pay, tab_due, tab_ledger, tab_chq, tab_hist = st.tabs(
     ["Record payment", "Payables & ageing", "Ledger (khata)", "Cheques", "Payment history"])
 
 payables = analytics.supplier_payables()
+if payables.empty:
+    st.info("No suppliers yet. Add your distributors on the **Suppliers** page, record their bills in "
+            "**Purchases**, then come back here to record payments.")
+    st.stop()
 sups = payables.set_index("supplier_id")
 
 # ------------------------------------------------------------------ record payment
@@ -87,7 +92,7 @@ with tab_pay:
                    + (" (cheque pending until cleared)" if pmode == "Cheque" else ""))
         phone = normalize_phone(str(sups.loc[psid, "phone"] or ""))
         if phone:
-            msg = (f"Payment advice from *{STORE_NAME}*\n\nAmount: Rs {pamt:,.2f}\nMode: {pmode}"
+            msg = (f"Payment advice from *{store_info()['name']}*\n\nAmount: Rs {pamt:,.2f}\nMode: {pmode}"
                    + (f"\nCheque no: {pchq}" if pchq else "") + (f"\nRef/UTR: {pref}" if pref else "")
                    + f"\nDate: {pdate}\n\nPlease update our account. Thank you!")
             st.link_button("📲 Send payment advice to supplier on WhatsApp", wa_link(phone, msg))

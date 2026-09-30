@@ -6,11 +6,15 @@ import streamlit.components.v1 as components
 
 from app import db
 from app.sub_ui import render_panel
-from app.ui import STORE_DL, STORE_GSTIN, STORE_NAME, inr
+from app.tenancy import is_owner, store_info
+from app.ui import inr
 from app.upi import STORE_UPI_ID, is_demo_upi, qr_data_uri, qr_png, upi_link
 from app.whatsapp import bill_message, normalize_phone, wa_link
 
 st.title("🧾 Billing (POS)")
+STORE = store_info()
+STORE_NAME = STORE["name"]
+STORE_UPI = STORE["upi_id"] or STORE_UPI_ID
 
 if "cart" not in st.session_state:
     st.session_state.cart = []
@@ -57,8 +61,8 @@ def invoice_html(inv: dict, patient: str, doctor: str | None, mode: str, qr_uri:
     return f"""
     <div style="font-family:Arial;font-size:12px;border:1px solid #999;padding:12px;max-width:760px;
                 background:#fff;color:#111">
-      <div style="text-align:center"><b style="font-size:16px">{STORE_NAME}</b><br>
-      Jaipur, Rajasthan · GSTIN {STORE_GSTIN} · DL No. {STORE_DL}<br><b>TAX INVOICE</b></div>
+      <div style="text-align:center"><b style="font-size:16px">{html.escape(STORE_NAME)}</b><br>
+      {html.escape(', '.join(x for x in (STORE['address'], STORE['city']) if x))} · GSTIN {STORE['gstin']} · DL No. {html.escape(STORE['drug_licence'])}<br><b>TAX INVOICE</b></div>
       <hr><table style="width:100%"><tr><td>Invoice: <b>{inv['invoice_no']}</b><br>Date: {inv['ts']}</td>
       <td style="text-align:right">Patient: {html.escape(patient or 'Walk-in')}<br>
       Prescriber: {html.escape(doctor or '-')}<br>Payment: {mode}</td></tr></table>
@@ -70,7 +74,7 @@ def invoice_html(inv: dict, patient: str, doctor: str | None, mode: str, qr_uri:
       <td style="text-align:right">MRP total: ₹{t['gross']:.2f}<br>Discount: -₹{t['disc']:.2f}<br>
       <b style="font-size:15px">Net payable: ₹{t['total']:.2f}</b></td></tr></table>
       {f'<div style="margin-top:8px;text-align:center"><img src="{qr_uri}" width="120"><br>'
-       f'<b>Scan to pay ₹{t["total"]:.2f} by UPI</b> · {STORE_UPI_ID}</div>' if qr_uri else ''}
+       f'<b>Scan to pay ₹{t["total"]:.2f} by UPI</b> · {STORE_UPI}</div>' if qr_uri else ''}
       <div style="font-size:10px;margin-top:8px">Prices are inclusive of GST. Computer-generated invoice.
       Pharmacist: ____________</div></div>"""
 
@@ -216,14 +220,14 @@ with tab_bill:
         # UPI QR with the exact amount - shown for UPI and Credit (pay-later) bills
         qr_uri = None
         if mode in ("UPI", "Credit") and inv["totals"]["total"] > 0:
-            link = upi_link(inv["totals"]["total"], f"Bill {inv['invoice_no']}", payee=STORE_NAME)
+            link = upi_link(inv["totals"]["total"], f"Bill {inv['invoice_no']}", vpa=STORE_UPI, payee=STORE_NAME)
             qr_uri = qr_data_uri(link)
             q1, q2 = st.columns([1, 3])
             q1.image(qr_png(link), width=180)
-            q2.markdown(f"**Scan to pay {inr(inv['totals']['total'], 2)}**  \nUPI ID: `{STORE_UPI_ID}`  \n"
+            q2.markdown(f"**Scan to pay {inr(inv['totals']['total'], 2)}**  \nUPI ID: `{STORE_UPI}`  \n"
                         "Works with GPay, PhonePe, Paytm, BHIM. Amount is pre-filled.")
-            if is_demo_upi():
-                q2.warning("Demo UPI ID - set STORE_UPI_ID to the store's real UPI ID before use.")
+            if is_demo_upi(STORE_UPI):
+                q2.warning("Demo UPI ID - set your store's UPI ID in Store settings before use.")
         page = invoice_html(inv, patient, doctor, mode, qr_uri)
         components.html(page, height=160 + 34 * len(inv["lines"]) + (300 if qr_uri else 140), scrolling=True)
         st.download_button("⬇ Download invoice (HTML - print to PDF)", page,
@@ -263,4 +267,4 @@ with tab_today:
     c1.metric("Bills", len(today))
     c2.metric("Sales", inr(today["total"].sum()))
     c3.metric("Cash in drawer (cash bills)", inr(today.loc[today.payment_mode == "Cash", "total"].sum()))
-    st.dataframe(today, hide_index=True, width="stretch")
+    st.dataframe(today if is_owner() else today.drop(columns=["profit"]), hide_index=True, width="stretch")

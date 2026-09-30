@@ -3,11 +3,14 @@ import urllib.parse
 import streamlit as st
 
 from app import analytics, db
-from app.ui import STORE_NAME, inr, money_cols
+from app.tenancy import store_info
+from app.ui import inr, money_cols
 from app.upi import STORE_UPI_ID, qr_png, upi_link
 from app.whatsapp import normalize_phone, udhaar_message, wa_link
 
 st.title("👥 Customers")
+STORE_NAME = store_info()["name"]
+STORE_UPI = store_info()["upi_id"] or STORE_UPI_ID
 tab_list, tab_refill, tab_credit, tab_add = st.tabs(
     ["Customers", "Refill reminders", "Credit (udhaar) ledger", "Add customer"])
 
@@ -59,7 +62,7 @@ with tab_credit:
             phone = normalize_phone(r["phone"])
             if not phone:
                 return None
-            msg = udhaar_message(r["name"], r["outstanding"], STORE_NAME, STORE_UPI_ID, r["last_credit_bill"])
+            msg = udhaar_message(r["name"], r["outstanding"], STORE_NAME, STORE_UPI, r["last_credit_bill"])
             return wa_link(phone, msg)
         view = view.assign(remind=view.apply(reminder, axis=1))
         st.dataframe(
@@ -84,10 +87,10 @@ with tab_credit:
                 st.success(f"Payment of {inr(amt, 2)} recorded")
                 st.rerun()
         if show_qr:
-            link = upi_link(float(amt), f"Udhaar {who.split(' · ')[0]}", payee=STORE_NAME)
+            link = upi_link(float(amt), f"Udhaar {who.split(' · ')[0]}", vpa=STORE_UPI, payee=STORE_NAME)
             q1, q2 = st.columns([1, 3])
             q1.image(qr_png(link), width=170)
-            q2.markdown(f"Customer scans to pay **{inr(amt, 2)}** to `{STORE_UPI_ID}`, "
+            q2.markdown(f"Customer scans to pay **{inr(amt, 2)}** to `{STORE_UPI}`, "
                         "then click *Record payment* once it is received.")
 
 with tab_add:

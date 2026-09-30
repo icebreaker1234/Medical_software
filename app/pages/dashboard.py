@@ -2,9 +2,33 @@ import plotly.express as px
 import streamlit as st
 
 from app import analytics, db
-from app.ui import STORE_NAME, inr, kpi, lakh
+from app.tenancy import store_info
+from app.ui import inr, kpi, lakh
 
-st.title(f"🏠 {STORE_NAME}")
+st.title(f"🏠 {store_info()['name']}")
+if db.is_empty():
+    st.subheader("Welcome - let's set up your store")
+    st.markdown("Your store has its own database and it is empty.")
+    st.success("**Moving from Marg, Tally or Excel?** Export your stock, suppliers, customers and bills from the "
+               "old software and drop the files here - no retyping.")
+    st.page_link("app/pages/import_data.py", label="Import from my old software", icon="📥")
+    st.markdown("**Or set it up by hand, in this order:**")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown("**1. Store details**  \nGSTIN, drug licence and UPI ID for your bills.")
+        st.page_link("app/pages/store_settings.py", label="Store settings", icon="⚙️")
+    with c2:
+        st.markdown("**2. Suppliers**  \nYour distributors and their credit days.")
+        st.page_link("app/pages/suppliers.py", label="Add suppliers", icon="🏭")
+    with c3:
+        st.markdown("**3. Medicines**  \nAdd each medicine with its composition.")
+        st.page_link("app/pages/inventory.py", label="Add medicines", icon="📦")
+    with c4:
+        st.markdown("**4. Stock in**  \nEnter purchase bills (or scan them) to add stock.")
+        st.page_link("app/pages/purchases.py", label="Purchases", icon="🚚")
+    st.info("Just exploring? Load 6 months of sample data from **Store settings & backup** - "
+            "you can delete it later.")
+    st.stop()
 k = analytics.kpis()
 
 c1, c2, c3, c4 = st.columns(4)

@@ -106,6 +106,5 @@ with tab_master:
                                "'A-Z Medicine Dataset of India' columns: name, short_composition1, "
                                "short_composition2")
     if up is not None and st.button("Save brand list", type="primary"):
-        S.CUSTOM_MASTER.parent.mkdir(parents=True, exist_ok=True)
-        S.CUSTOM_MASTER.write_bytes(up.getvalue())
+        S.custom_master_path().write_bytes(up.getvalue())
         st.success(f"Saved. {len(S.brand_master())} brands now available.")

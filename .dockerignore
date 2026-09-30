@@ -11,3 +11,5 @@ models/*.joblib
 models/*.csv
 models/*.json
 reports
+store_data
+.streamlit/secrets.toml

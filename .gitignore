@@ -16,3 +16,6 @@ automation_update.zip
 # secrets - never commit
 .streamlit/secrets.toml
 .env
+
+# real store data: accounts, passwords (hashed), store databases, backups - never commit
+store_data/

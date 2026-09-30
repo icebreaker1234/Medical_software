@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -19,19 +20,22 @@ import pandas as pd
 from app import db
 from app.composition import (describe, load_brand_master, lookup_brand, nti_salts,
                              parse_composition, salts_key)
-from src.config import PHARMACY_DB
-
-CUSTOM_MASTER = PHARMACY_DB.parent / "brand_master_custom.csv"
 
 
-@lru_cache(maxsize=1)
-def _master(mtime: float):
-    return load_brand_master(CUSTOM_MASTER)
+def custom_master_path() -> Path:
+    """Each store keeps its own uploaded brand list next to its database file."""
+    f = Path(db.db_file())
+    return f.with_name(f.stem + "_brands.csv")
+
+
+@lru_cache(maxsize=8)
+def _master(path: str, mtime: float):
+    return load_brand_master(Path(path))
 
 
 def brand_master() -> list[dict]:
-    mtime = CUSTOM_MASTER.stat().st_mtime if CUSTOM_MASTER.exists() else 0.0
-    return _master(mtime)
+    path = custom_master_path()
+    return _master(str(path), path.stat().st_mtime if path.exists() else 0.0)
 
 
 def pack_units(pack: str | None) -> float:

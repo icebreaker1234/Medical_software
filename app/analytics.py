@@ -42,7 +42,10 @@ def stock_status(cover_target_days: int = 7) -> pd.DataFrame:
     p = db.products_df()
     v = db.velocity(30)[["product_id", "per_day"]]
     df = p.merge(v, left_on="id", right_on="product_id", how="left").fillna({"per_day": 0})
-    df["days_cover"] = np.where(df["per_day"] > 0, df["stock"] / df["per_day"], np.inf)
+    df["per_day"] = pd.to_numeric(df["per_day"], errors="coerce").fillna(0.0).astype(float)
+    df["stock"] = pd.to_numeric(df["stock"], errors="coerce").fillna(0).astype(float)
+    with np.errstate(divide="ignore", invalid="ignore"):          # no sales yet -> infinite cover
+        df["days_cover"] = np.where(df["per_day"] > 0, df["stock"] / df["per_day"].replace(0, np.nan), np.inf)
     df["stockout_date"] = [
         (db.today() + timedelta(days=int(d))).isoformat() if np.isfinite(d) else "-"
         for d in df["days_cover"]]

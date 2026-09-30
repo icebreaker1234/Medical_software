@@ -1,17 +1,26 @@
-"""Streamlit entry point (repo root):   streamlit run streamlit_app.py"""
+"""Streamlit entry point (repo root):   streamlit run streamlit_app.py
+
+On your own computer: owners log in and each store has its own database file.
+On Streamlit Community Cloud (or PHARMACY_MODE=demo): no login, shared sample data.
+"""
+import os
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+os.environ.setdefault("TZ", "Asia/Kolkata")          # Indian store: dates follow IST
+if hasattr(time, "tzset"):
+    time.tzset()
 
 import streamlit as st  # noqa: E402
 
-from app import db  # noqa: E402
-from app.ui import STORE_NAME, setup  # noqa: E402
+from app import db, tenancy  # noqa: E402
+from app.ui import setup  # noqa: E402
 
-st.set_page_config(page_title=STORE_NAME, page_icon="💊", layout="wide")
+st.set_page_config(page_title="Pharmacy Store", page_icon="💊", layout="wide")
 setup()
 
 
@@ -27,34 +36,49 @@ def _init():
             from src.monitoring import drift
             for step in (generate, prepare, build, train, drift):
                 step.main()
-    db.init_db()
+    if tenancy.mode() == "demo":
+        db.init_db()                                  # shared sample store
     return True
 
 
 _init()
 
-pages = {
-    "Store": [
-        st.Page("app/pages/dashboard.py", title="Dashboard", icon="🏠", default=True),
-        st.Page("app/pages/billing.py", title="Billing (POS)", icon="🧾"),
-        st.Page("app/pages/inventory.py", title="Inventory", icon="📦"),
-        st.Page("app/pages/purchases.py", title="Purchases", icon="🚚"),
-        st.Page("app/pages/suppliers.py", title="Suppliers", icon="🏭"),
-        st.Page("app/pages/supplier_payments.py", title="Supplier Payments", icon="💸"),
-        st.Page("app/pages/customers.py", title="Customers", icon="👥"),
-        st.Page("app/pages/reports.py", title="Reports & GST", icon="📊"),
-    ],
-    "Intelligence": [
-        st.Page("app/pages/substitutes.py", title="Substitutes & Missed Demand", icon="🔁"),
-        st.Page("app/pages/expiry.py", title="Expiry & Dead Stock", icon="⏳"),
-        st.Page("app/pages/forecast.py", title="Demand Forecast & Reorder", icon="📈"),
-    ],
-    "MLOps": [
-        st.Page("app/pages/mlops.py", title="Model Monitoring", icon="🛠️"),
-    ],
+if tenancy.mode() == "stores":
+    from app.auth_ui import logout, require_login
+    tenant = require_login()
+else:
+    tenancy.set_tenant(None)
+    tenant = None
+
+SPEC = {   # group -> (page key = file name, title, icon)
+    "Store": [("dashboard", "Dashboard", "🏠"), ("billing", "Billing (POS)", "🧾"),
+              ("inventory", "Inventory", "📦"), ("purchases", "Purchases", "🚚"),
+              ("suppliers", "Suppliers", "🏭"), ("supplier_payments", "Supplier Payments", "💸"),
+              ("customers", "Customers", "👥"), ("reports", "Reports & GST", "📊"),
+              ("import_data", "Import data", "📥")],
+    "Intelligence": [("substitutes", "Substitutes & Missed Demand", "🔁"),
+                     ("expiry", "Expiry & Dead Stock", "⏳"),
+                     ("forecast", "Demand Forecast & Reorder", "📈")],
+    "MLOps": [("mlops", "Model Monitoring", "🛠️")],
 }
-nav = st.navigation(pages)
+if tenant:
+    SPEC["Account"] = [("team", "Team & logins", "🔐"), ("store_settings", "Store settings & backup", "⚙️"),
+                       ("account", "My account", "👤")]
+
+allowed = {g: [x for x in items if tenancy.can_open(x[0])] for g, items in SPEC.items()}
+allowed = {g: items for g, items in allowed.items() if items}
+first = next(iter(allowed.values()))[0][0]             # owner -> Dashboard, staff -> Billing
+pages = {g: [st.Page(f"app/pages/{k}.py", title=t, icon=i, default=(k == first)) for k, t, i in items]
+         for g, items in allowed.items()}
+nav = st.navigation(pages, expanded=True)
+
+info = tenancy.store_info()
 with st.sidebar:
-    st.caption(f"**{STORE_NAME}**  \nJaipur · {db.today():%d %b %Y}")
-    st.caption("Demo data · Schedule classifications are illustrative")
+    st.caption(f"**{info['name']}**  \n{info['city'] or ''} · {db.today():%d %b %Y}")
+    if tenant:
+        st.caption(f"👤 {tenant.get('user_name') or tenant['user_id']} · {tenant['role']}")
+        if st.button("Log out", width="stretch"):
+            logout()
+    else:
+        st.caption("Demo mode - sample data, no login")
 nav.run()
