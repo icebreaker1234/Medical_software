@@ -186,11 +186,19 @@ PAYMENT_MODES = ["Cash", "UPI", "Card", "Credit"]
 
 
 # ------------------------------------------------------------------ helpers
+_MIGRATED: set = set()
+
+
 def connect() -> sqlite3.Connection:
     conn = sqlite3.connect(PHARMACY_DB, timeout=10, detect_types=0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
+    # Streamlit Cloud hot-reloads new code without restarting the server, so the
+    # start-up init may not run again: upgrade an older database on first use.
+    if str(PHARMACY_DB) not in _MIGRATED:
+        _MIGRATED.add(str(PHARMACY_DB))
+        migrate(conn)
     return conn
 
 
