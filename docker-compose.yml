@@ -10,7 +10,7 @@ services:
     ports: ["8501:8501"]
     environment:
       API_URL: http://api:8000
-    command: streamlit run app/main.py --server.address 0.0.0.0 --server.port 8501 --server.headless true
+    command: streamlit run streamlit_app.py --server.address 0.0.0.0 --server.port 8501 --server.headless true
   mlflow:
     image: pharmacy-mlops:latest
     ports: ["5000:5000"]
