@@ -12,3 +12,7 @@ reports/*.html
 .pytest_cache/
 .DS_Store
 automation_update.zip
+
+# secrets - never commit
+.streamlit/secrets.toml
+.env

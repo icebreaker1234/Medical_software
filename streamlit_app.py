@@ -40,6 +40,7 @@ pages = {
         st.Page("app/pages/inventory.py", title="Inventory", icon="📦"),
         st.Page("app/pages/purchases.py", title="Purchases", icon="🚚"),
         st.Page("app/pages/suppliers.py", title="Suppliers", icon="🏭"),
+        st.Page("app/pages/supplier_payments.py", title="Supplier Payments", icon="💸"),
         st.Page("app/pages/customers.py", title="Customers", icon="👥"),
         st.Page("app/pages/reports.py", title="Reports & GST", icon="📊"),
     ],

@@ -6,7 +6,7 @@ from datetime import date, timedelta
 import pandas as pd
 import streamlit as st
 
-from app import db
+from app import analytics, db
 from app.ocr import OCRUnavailable, ocr_image, sample_invoice, simulate_phone_photo
 from app.ui import inr, money_cols
 
@@ -224,14 +224,18 @@ with tab_scan:
 with tab_hist:
     h = db.q("""SELECT pu.id, pu.received_date, s.name AS supplier, pu.invoice_no, pu.ordered_qty,
                        pu.received_qty, pu.taxable, pu.tax, pu.total,
-                       CASE WHEN pu.paid=1 THEN 'Paid' ELSE 'Due' END AS payment
+                       pu.total AS _t
                 FROM purchases pu JOIN suppliers s ON s.id=pu.supplier_id
-                ORDER BY pu.received_date DESC, pu.id DESC""")
+                ORDER BY pu.received_date DESC, pu.id DESC""").drop(columns="_t")
+    bill_status = analytics.supplier_bills().set_index("purchase_id")
+    h["outstanding"] = h["id"].map(bill_status["outstanding"])
+    h["payment"] = h["id"].map(bill_status["status"])
     c1, c2 = st.columns(2)
     c1.metric("Purchases - last 30 days",
               inr(h.loc[pd.to_datetime(h.received_date) > pd.Timestamp(db.today() - timedelta(days=30)),
                         "total"].sum()))
-    c2.metric("Payable to suppliers", inr(h.loc[h.payment == "Due", "total"].sum()))
+    c2.metric("Payable to suppliers", inr(h["outstanding"].sum()),
+              "record payments in Supplier Payments", delta_color="off")
     st.dataframe(h, hide_index=True, width="stretch", height=450,
                  column_config=money_cols(h, ["taxable", "tax", "total"]))
 

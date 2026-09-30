@@ -28,6 +28,7 @@ pages = {
         st.Page("pages/inventory.py", title="Inventory", icon="📦"),
         st.Page("pages/purchases.py", title="Purchases", icon="🚚"),
         st.Page("pages/suppliers.py", title="Suppliers", icon="🏭"),
+        st.Page("pages/supplier_payments.py", title="Supplier Payments", icon="💸"),
         st.Page("pages/customers.py", title="Customers", icon="👥"),
         st.Page("pages/reports.py", title="Reports & GST", icon="📊"),
     ],

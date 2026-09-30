@@ -130,9 +130,11 @@ def supplier_performance() -> pd.DataFrame:
                        SUM(pu.received_qty)*1.0 / SUM(pu.ordered_qty) AS fill_rate,
                        SUM(CASE WHEN pu.received_qty < pu.ordered_qty THEN 1 ELSE 0 END)*1.0
                            / COUNT(pu.id) AS short_supply_rate,
-                       SUM(CASE WHEN pu.paid=0 THEN pu.total ELSE 0 END) AS payable
+                       0.0 AS payable
                 FROM suppliers s LEFT JOIN purchases pu ON pu.supplier_id = s.id
                 GROUP BY s.id""")
+    bills = supplier_bills()
+    p["payable"] = p["id"].map(bills.groupby("supplier_id")["outstanding"].sum()).fillna(0.0)
     r = db.q("""SELECT supplier_id AS id, SUM(value) AS returns_value,
                        SUM(CASE WHEN credit_note_status='Pending' THEN value ELSE 0 END) AS pending_claims
                 FROM supplier_returns GROUP BY supplier_id""")
@@ -311,3 +313,98 @@ def udhaar_ledger() -> pd.DataFrame:
     df["ageing"] = pd.cut(df["days_pending"], [-1, 15, 30, 60, 10_000],
                           labels=["0-15 days", "16-30 days", "31-60 days", "60+ days"]).astype(str)
     return df.sort_values(["days_pending", "outstanding"], ascending=False)
+
+
+# ------------------------------------------------------------------ supplier payments
+def supplier_bills(supplier_id: int | None = None) -> pd.DataFrame:
+    """Every purchase bill with what is paid, pending (cheques), outstanding and overdue."""
+    df = db.q(f"""
+        SELECT pu.id AS purchase_id, pu.supplier_id, s.name AS supplier, pu.invoice_no, pu.received_date,
+               date(pu.received_date, '+' || s.credit_days || ' days') AS due_date, pu.total,
+               COALESCE((SELECT SUM(a.amount) FROM supplier_payment_allocations a
+                         JOIN supplier_payments p ON p.id=a.payment_id
+                         WHERE a.purchase_id=pu.id AND p.status='Cleared'),0) AS paid,
+               COALESCE((SELECT SUM(a.amount) FROM supplier_payment_allocations a
+                         JOIN supplier_payments p ON p.id=a.payment_id
+                         WHERE a.purchase_id=pu.id AND p.status='Pending'),0) AS cheque_pending
+        FROM purchases pu JOIN suppliers s ON s.id=pu.supplier_id
+        {"WHERE pu.supplier_id=?" if supplier_id else ""}
+        ORDER BY pu.received_date, pu.id""", (supplier_id,) if supplier_id else ())
+    df["outstanding"] = (df["total"] - df["paid"] - df["cheque_pending"]).clip(lower=0).round(2)
+    df["days_overdue"] = np.where(
+        df["outstanding"] > 0.01,
+        (pd.Timestamp(db.today()) - pd.to_datetime(df["due_date"])).dt.days.clip(lower=0), 0).astype(int)
+    df["status"] = np.select(
+        [df["cheque_pending"] > 0, df["outstanding"] <= 0.01, df["days_overdue"] > 0, df["paid"] > 0],
+        ["Cheque pending", "Paid", "Overdue", "Part paid"], "Due")
+    return df
+
+
+def supplier_payables() -> pd.DataFrame:
+    """Per supplier: what we owe, how old it is, advances and cheques in transit."""
+    bills = supplier_bills()
+    sup = db.q("SELECT id AS supplier_id, name AS supplier, phone, credit_days FROM suppliers")
+    open_ = bills[bills["outstanding"] > 0.01]
+    age = pd.cut(open_["days_overdue"], [-1, 0, 30, 60, 10_000],
+                 labels=["not_yet_due", "overdue_1_30", "overdue_31_60", "overdue_60_plus"])
+    ageing = open_.assign(bucket=age).pivot_table(index="supplier_id", columns="bucket", values="outstanding",
+                                                  aggfunc="sum", observed=False).fillna(0)
+    pay = db.q("""SELECT p.supplier_id, SUM(p.amount) AS paid_total,
+                         SUM(p.amount) - COALESCE(SUM((SELECT SUM(a.amount) FROM supplier_payment_allocations a
+                                                       WHERE a.payment_id=p.id)),0) AS advance
+                  FROM supplier_payments p WHERE p.status!='Bounced' GROUP BY p.supplier_id""")
+    out = (sup.merge(bills.groupby("supplier_id").agg(purchases=("total", "sum"),
+                                                      outstanding=("outstanding", "sum"),
+                                                      cheque_pending=("cheque_pending", "sum"),
+                                                      open_bills=("outstanding", lambda s: int((s > 0.01).sum())))
+                     .reset_index(), on="supplier_id", how="left")
+              .merge(ageing.reset_index(), on="supplier_id", how="left")
+              .merge(pay[["supplier_id", "advance"]], on="supplier_id", how="left")).fillna(0)
+    for c in ["not_yet_due", "overdue_1_30", "overdue_31_60", "overdue_60_plus"]:
+        if c not in out:
+            out[c] = 0.0
+    out["overdue"] = out[["overdue_1_30", "overdue_31_60", "overdue_60_plus"]].sum(axis=1)
+    out["advance"] = out["advance"].clip(lower=0).round(2)
+    return out.sort_values("overdue", ascending=False)
+
+
+def supplier_ledger(supplier_id: int) -> pd.DataFrame:
+    """Khata / ledger: bills (credit to supplier) vs payments & credit notes, with running balance."""
+    bills = db.q("""SELECT received_date AS date, 'Purchase bill ' || COALESCE(invoice_no,'#'||id) AS particulars,
+                           total AS bill_amount, 0.0 AS paid_amount, NULL AS mode, NULL AS status
+                    FROM purchases WHERE supplier_id=?""", (supplier_id,))
+    pays = db.q("""SELECT pay_date AS date,
+                          'Payment - ' || mode || COALESCE(' #' || cheque_no, '') || COALESCE(' ' || reference, '')
+                              AS particulars,
+                          0.0 AS bill_amount, CASE WHEN status='Bounced' THEN 0 ELSE amount END AS paid_amount,
+                          mode, status
+                   FROM supplier_payments WHERE supplier_id=?""", (supplier_id,))
+    cns = db.q("""SELECT date(ts) AS date, 'Credit note ' || credit_note_no || ' (return)' AS particulars,
+                         0.0 AS bill_amount, value AS paid_amount, 'Credit note' AS mode, 'Cleared' AS status
+                  FROM supplier_returns WHERE supplier_id=? AND credit_note_status='Received'""", (supplier_id,))
+    led = pd.concat([bills, pays, cns], ignore_index=True)
+    if led.empty:
+        return led
+    led = led.sort_values(["date", "bill_amount"], ascending=[True, False]).reset_index(drop=True)
+    led["balance_due"] = (led["bill_amount"] - led["paid_amount"]).cumsum().round(2)
+    return led
+
+
+def cheque_register() -> pd.DataFrame:
+    df = db.q("""SELECT p.id, s.name AS supplier, p.cheque_no, p.bank, p.pay_date AS issued_on, p.cheque_date,
+                        p.amount, p.status, p.cleared_on, p.note
+                 FROM supplier_payments p JOIN suppliers s ON s.id=p.supplier_id
+                 WHERE p.mode='Cheque' ORDER BY p.cheque_date DESC""")
+    df["post_dated"] = pd.to_datetime(df["cheque_date"]) > pd.Timestamp(db.today())
+    return df
+
+
+def supplier_payment_history(days: int = 90) -> pd.DataFrame:
+    return db.q("""SELECT p.id, p.pay_date, s.name AS supplier, p.amount, p.mode, p.reference, p.cheque_no,
+                          p.cheque_date, p.bank, p.status, p.note, p.entered_by,
+                          (SELECT GROUP_CONCAT(COALESCE(pu.invoice_no, '#' || pu.id), ', ')
+                           FROM supplier_payment_allocations a JOIN purchases pu ON pu.id=a.purchase_id
+                           WHERE a.payment_id=p.id) AS bills_settled
+                   FROM supplier_payments p JOIN suppliers s ON s.id=p.supplier_id
+                   WHERE date(p.pay_date) > date('now','localtime', ?)
+                   ORDER BY p.pay_date DESC, p.id DESC""", (f"-{days} days",))

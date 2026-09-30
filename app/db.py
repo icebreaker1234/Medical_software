@@ -83,6 +83,20 @@ CREATE TABLE IF NOT EXISTS unmet_demand (
     outcome TEXT NOT NULL,           -- substituted | lost | ordered
     given_product_id INTEGER REFERENCES products(id), pharmacist TEXT, note TEXT,
     est_value REAL);
+-- money paid to suppliers (cash / cheque / UPI / NEFT ...) and which bills it settles
+CREATE TABLE IF NOT EXISTS supplier_payments (
+    id INTEGER PRIMARY KEY, supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
+    pay_date TEXT NOT NULL, amount REAL NOT NULL CHECK (amount > 0),
+    mode TEXT NOT NULL,              -- Cash | Cheque | UPI | NEFT | RTGS | Bank transfer | Adjustment
+    reference TEXT,                  -- UTR / transaction id
+    cheque_no TEXT, cheque_date TEXT, bank TEXT,
+    status TEXT NOT NULL DEFAULT 'Cleared',   -- Cleared | Pending (cheque) | Bounced
+    cleared_on TEXT, note TEXT, entered_by TEXT, ts TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS supplier_payment_allocations (
+    id INTEGER PRIMARY KEY, payment_id INTEGER NOT NULL REFERENCES supplier_payments(id),
+    purchase_id INTEGER NOT NULL REFERENCES purchases(id), amount REAL NOT NULL CHECK (amount > 0));
+CREATE INDEX IF NOT EXISTS ix_sp_sup ON supplier_payments(supplier_id);
+CREATE INDEX IF NOT EXISTS ix_spa_pur ON supplier_payment_allocations(purchase_id);
 CREATE INDEX IF NOT EXISTS ix_sales_ts ON sales(ts);
 CREATE INDEX IF NOT EXISTS ix_unmet_ts ON unmet_demand(ts);
 CREATE INDEX IF NOT EXISTS ix_si_sale ON sale_items(sale_id);
@@ -284,6 +298,21 @@ def migrate(conn) -> None:
             conn.execute("UPDATE products SET composition=?, dosage_form=?, release_type=?, comp_key=? "
                          "WHERE id=?", (d["composition"], d["dosage_form"], d["release_type"],
                                         d["comp_key"], r["id"]))
+    # older versions only had a paid=1 flag: turn those bills into one opening payment per supplier
+    legacy = conn.execute("""SELECT id, supplier_id, received_date, total FROM purchases
+                             WHERE paid=1 AND id NOT IN (SELECT purchase_id FROM supplier_payment_allocations)
+                             ORDER BY supplier_id, received_date""").fetchall()
+    by_sup: dict[int, list] = {}
+    for r in legacy:
+        by_sup.setdefault(r["supplier_id"], []).append(r)
+    for sup, rows in by_sup.items():
+        pay_id = conn.execute(
+            "INSERT INTO supplier_payments(supplier_id,pay_date,amount,mode,status,note,entered_by,ts) "
+            "VALUES (?,?,?,?,?,?,?,?)", (sup, rows[-1]["received_date"], round(sum(r["total"] for r in rows), 2),
+                                         "Adjustment", "Cleared", "Opening balance - bills marked paid "
+                                         "before payment tracking", "system", now_ts())).lastrowid
+        conn.executemany("INSERT INTO supplier_payment_allocations(payment_id,purchase_id,amount) "
+                         "VALUES (?,?,?)", [(pay_id, r["id"], r["total"]) for r in rows])
     conn.commit()
 
 
@@ -525,6 +554,8 @@ def seed(days: int = 180, seed_value: int = 7) -> None:
     moves.sort(key=lambda m: m[0])
     cur.executemany("INSERT INTO stock_movements(ts,batch_id,product_id,qty_change,type,ref,note)"
                     " VALUES (?,?,?,?,?,?,?)", moves)
+    # supplier payments: bills older than ~30 days were paid (weekly, mixed modes)
+    _seed_supplier_payments(cur, rng, end)
     # customers asking for brands we don't have (substituted from stock, lost or ordered)
     master = load_brand_master()
     by_key: dict[str, list] = {}
@@ -862,3 +893,148 @@ def log_unmet(requested: str, qty: int, reason: str, outcome: str,
             "reason,outcome,given_product_id,pharmacist,note,est_value) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (now_ts(), requested, requested_product_id, composition, comp_key, int(qty), reason,
              outcome, given_product_id, pharmacist, note, est_value)).lastrowid
+
+
+# ------------------------------------------------------------------ supplier payments
+PAY_MODES = ["Cash", "Cheque", "UPI", "NEFT", "RTGS", "Bank transfer"]
+
+
+def _seed_supplier_payments(cur, rng, end: date) -> None:
+    bills = cur.execute("SELECT id, supplier_id, received_date, total FROM purchases WHERE paid=1 "
+                        "ORDER BY received_date").fetchall()
+    groups: dict[tuple, list] = {}
+    for b in bills:
+        d = date.fromisoformat(b[2])
+        groups.setdefault((b[1], d.isocalendar()[1], d.year), []).append(b)
+    chq = 400100
+    for (sup, _, _), rows in groups.items():
+        last = max(date.fromisoformat(r[2]) for r in rows)
+        credit = cur.execute("SELECT credit_days FROM suppliers WHERE id=?", (sup,)).fetchone()[0]
+        pay_day = min(last + timedelta(days=int(credit) + int(rng.integers(-5, 6))), end - timedelta(days=1))
+        mode = str(rng.choice(["NEFT", "Cheque", "UPI", "Cash"], p=[0.4, 0.3, 0.2, 0.1]))
+        amount = round(sum(r[3] for r in rows), 2)
+        chq += 1
+        pid = cur.execute(
+            "INSERT INTO supplier_payments(supplier_id,pay_date,amount,mode,reference,cheque_no,cheque_date,"
+            "bank,status,cleared_on,entered_by,ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sup, str(pay_day), amount, mode,
+             f"UTR{rng.integers(10**11, 10**12)}" if mode in ("NEFT", "UPI") else None,
+             str(chq) if mode == "Cheque" else None, str(pay_day) if mode == "Cheque" else None,
+             "HDFC Bank" if mode in ("Cheque", "NEFT") else None,
+             "Pending" if mode == "Cheque" and pay_day + timedelta(days=2) > end else "Cleared",
+             None if mode == "Cheque" and pay_day + timedelta(days=2) > end
+             else str(pay_day + timedelta(days=2 if mode == "Cheque" else 0)), "owner",
+             f"{pay_day} 17:30:00")).lastrowid
+        cur.executemany("INSERT INTO supplier_payment_allocations(payment_id,purchase_id,amount) VALUES (?,?,?)",
+                        [(pid, r[0], r[3]) for r in rows])
+    # a few live cheque situations for the demo: pending, post-dated, bounced
+    due = cur.execute("SELECT id, supplier_id, total FROM purchases WHERE paid=0 ORDER BY received_date")\
+        .fetchall()
+    plan = [("Pending", end - timedelta(days=2), end - timedelta(days=2)),
+            ("Pending", end - timedelta(days=1), end + timedelta(days=5)),      # post-dated cheque
+            ("Bounced", end - timedelta(days=12), end - timedelta(days=12))]
+    for (status, issued, chq_date), bill in zip(plan, due[:3]):
+        chq += 1
+        pid = cur.execute(
+            "INSERT INTO supplier_payments(supplier_id,pay_date,amount,mode,cheque_no,cheque_date,bank,status,"
+            "note,entered_by,ts) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (bill[1], str(issued), bill[2], "Cheque", str(chq), str(chq_date), "HDFC Bank", status,
+             "Returned unpaid - insufficient funds" if status == "Bounced" else None, "owner",
+             f"{issued} 17:30:00")).lastrowid
+        cur.execute("INSERT INTO supplier_payment_allocations(payment_id,purchase_id,amount) VALUES (?,?,?)",
+                    (pid, bill[0], bill[2]))
+    for (sup,) in cur.execute("SELECT id FROM suppliers").fetchall():
+        _refresh_paid_flags(cur, sup)
+
+
+def _bill_balances(conn, supplier_id: int) -> dict[int, float]:
+    """Outstanding per bill = total - money allocated from payments that did not bounce."""
+    rows = conn.execute("""
+        SELECT pu.id, pu.total - COALESCE((SELECT SUM(a.amount) FROM supplier_payment_allocations a
+                                          JOIN supplier_payments p ON p.id=a.payment_id
+                                          WHERE a.purchase_id=pu.id AND p.status!='Bounced'),0) AS due
+        FROM purchases pu WHERE pu.supplier_id=? ORDER BY pu.received_date, pu.id""", (supplier_id,)).fetchall()
+    return {r["id"]: round(r["due"], 2) for r in rows}
+
+
+def _refresh_paid_flags(conn, supplier_id: int) -> None:
+    for pid, due in _bill_balances(conn, supplier_id).items():
+        conn.execute("UPDATE purchases SET paid=? WHERE id=?", (1 if due <= 0.01 else 0, pid))
+
+
+def auto_allocate(supplier_id: int, amount: float) -> list[tuple[int, float]]:
+    """Oldest bills first (FIFO) - the usual way distributors adjust payments."""
+    conn = connect()
+    try:
+        out, left = [], round(amount, 2)
+        for pid, due in _bill_balances(conn, supplier_id).items():
+            if left <= 0:
+                break
+            if due > 0.01:
+                take = round(min(due, left), 2)
+                out.append((pid, take))
+                left = round(left - take, 2)
+        return out
+    finally:
+        conn.close()
+
+
+def record_supplier_payment(supplier_id: int, pay_date: str, amount: float, mode: str,
+                            allocations: list[tuple[int, float]] | None = None,
+                            reference: str | None = None, cheque_no: str | None = None,
+                            cheque_date: str | None = None, bank: str | None = None,
+                            note: str | None = None, user: str = "owner") -> int:
+    """Record a payment to a supplier and settle bills with it.
+
+    allocations=None -> oldest bills first. Any amount not allocated stays as an advance.
+    Cheques start as 'Pending' until marked cleared; other modes are 'Cleared' at once.
+    """
+    amount = round(float(amount), 2)
+    if amount <= 0:
+        raise ValueError("Amount must be more than zero")
+    if mode not in PAY_MODES:
+        raise ValueError(f"Mode must be one of {PAY_MODES}")
+    if date.fromisoformat(str(pay_date)) > today():
+        raise ValueError("Payment date cannot be in the future (use the cheque date for a post-dated cheque)")
+    if mode == "Cheque" and not (cheque_no or "").strip():
+        raise ValueError("Cheque number is required")
+    if allocations is None:
+        allocations = auto_allocate(supplier_id, amount)
+    allocations = [(int(p), round(float(a), 2)) for p, a in allocations if a and float(a) > 0]
+    if sum(a for _, a in allocations) > amount + 0.01:
+        raise ValueError("Amount allocated to bills is more than the payment")
+    with tx() as conn:
+        if not conn.execute("SELECT 1 FROM suppliers WHERE id=?", (supplier_id,)).fetchone():
+            raise ValueError("Unknown supplier")
+        dues = _bill_balances(conn, supplier_id)
+        for pid, a in allocations:
+            if pid not in dues:
+                raise ValueError(f"Bill #{pid} does not belong to this supplier")
+            if a > dues[pid] + 0.01:
+                raise ValueError(f"Bill #{pid}: paying {a:.2f} but only {dues[pid]:.2f} is due")
+        status = "Pending" if mode == "Cheque" else "Cleared"
+        pay_id = conn.execute(
+            "INSERT INTO supplier_payments(supplier_id,pay_date,amount,mode,reference,cheque_no,cheque_date,"
+            "bank,status,cleared_on,note,entered_by,ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (supplier_id, str(pay_date), amount, mode, reference or None, cheque_no or None,
+             str(cheque_date or pay_date) if mode == "Cheque" else None, bank or None, status,
+             None if status == "Pending" else str(pay_date), note or None, user, now_ts())).lastrowid
+        conn.executemany("INSERT INTO supplier_payment_allocations(payment_id,purchase_id,amount) VALUES (?,?,?)",
+                         [(pay_id, p, a) for p, a in allocations])
+        _refresh_paid_flags(conn, supplier_id)
+    return pay_id
+
+
+def set_cheque_status(payment_id: int, status: str, on_date: str | None = None, note: str | None = None) -> None:
+    """Pending cheque -> Cleared or Bounced. A bounced cheque re-opens the bills it was paying."""
+    if status not in ("Cleared", "Bounced"):
+        raise ValueError("Status must be Cleared or Bounced")
+    with tx() as conn:
+        p = conn.execute("SELECT * FROM supplier_payments WHERE id=?", (payment_id,)).fetchone()
+        if not p or p["mode"] != "Cheque":
+            raise ValueError("Not a cheque payment")
+        if p["status"] != "Pending":
+            raise ValueError(f"Cheque is already {p['status']}")
+        conn.execute("UPDATE supplier_payments SET status=?, cleared_on=?, note=COALESCE(?, note) WHERE id=?",
+                     (status, str(on_date or today()), note, payment_id))
+        _refresh_paid_flags(conn, p["supplier_id"])
